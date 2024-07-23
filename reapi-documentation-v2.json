@@ -1,0 +1,50 @@
+{
+  "property_types": ["SFR", "MFR", "CONDO", "LAND", "MOBILE", "OTHER"],
+  "boolean_filters": [
+    "pre_foreclosure", "foreclosure", "auction", "reo", "mls_active", "mls_pending",
+    "mls_cancelled", "vacant", "absentee_owner", "corporate_owned", "cash_buyer",
+    "high_equity", "free_clear", "tax_lien", "judgment", "inherited", "out_of_state_owner",
+    "in_state_owner", "investor_buyer", "private_lender", "quit_claim", "flood_zone",
+    "pool", "garage", "assumable", "adjustable_rate", "death", "mfh_2to4", "mfh_5plus"
+  ],
+  "range_filters": [
+    {"name": "value", "min": "value_min", "max": "value_max"},
+    {"name": "equity", "min": "equity_min", "max": "equity_max"},
+    {"name": "beds", "min": "beds_min", "max": "beds_max"},
+    {"name": "baths", "min": "baths_min", "max": "baths_max"},
+    {"name": "building_size", "min": "building_size_min", "max": "building_size_max"},
+    {"name": "lot_size", "min": "lot_size_min", "max": "lot_size_max"},
+    {"name": "year_built", "min": "year_built_min", "max": "year_built_max"},
+    {"name": "last_sale_price", "min": "last_sale_price_min", "max": "last_sale_price_max"},
+    {"name": "mortgage", "min": "mortgage_min", "max": "mortgage_max"},
+    {"name": "assessed_value", "min": "assessed_value_min", "max": "assessed_value_max"},
+    {"name": "mls_days_on_market", "min": "mls_days_on_market_min", "max": "mls_days_on_market_max"},
+    {"name": "mls_listing_price", "min": "mls_listing_price_min", "max": "mls_listing_price_max"},
+    {"name": "years_owned", "min": "years_owned_min", "max": "years_owned_max"}
+  ],
+  "operator_filters": [
+    {"name": "last_sale_date", "operator": "last_sale_date_operator"},
+    {"name": "equity_percent", "operator": "equity_percent_operator"},
+    {"name": "estimated_equity", "operator": "equity_operator"},
+    {"name": "years_owned", "operator": "years_owned_operator"},
+    {"name": "median_income", "operator": "median_income_operator"},
+    {"name": "mls_listing_price", "operator": "mls_listing_price_operator"}
+  ],
+  "geo_filters": ["state", "county", "city", "zip", "latitude", "longitude", "radius"],
+  "special_filters": [
+    "ids_only", "obfuscate", "summary", "count", "polygon", "multi_polygon"
+  ],
+  "enumeration_fields": [
+    "construction", "document_type_code", "flood_zone_type", "loan_type_code_first",
+    "loan_type_code_second", "loan_type_code_third", "notice_type", "property_use_code",
+    "search_range", "sewage", "water_source"
+  ],
+  "autocomplete_fields": [
+    "id", "apn", "stateId", "countyId", "neighborhood_id", "neighborhood_name",
+    "searchType", "fips", "title"
+  ],
+  "sort_fields": [
+    "years_owned", "equity_percent", "year_built", "building_size", "lot_size",
+    "assessed_value", "last_sale_date", "estimated_equity", "estimated_value"
+  ]
+}
