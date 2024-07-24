@@ -37,7 +37,7 @@ headers = {
     "accept": "application/json",
     "x-user-id": "UniqueUserIdentifier",
     "content-type": "application/json",
-    "x-api-key": "x-api-key",
+    "x-api-key": '<Your API Key>',
 }
 
 # Step 4: Make the POST request to the API
