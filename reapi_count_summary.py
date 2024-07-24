@@ -1,5 +1,5 @@
 # Script Name: REAPI Property Search with Count, Summary, and Comprehensive CSV Output
-# Version: 6.8
+# Version: 7.2
 
 import requests
 import json
@@ -7,9 +7,10 @@ import logging
 import csv
 import pandas as pd
 from typing import Dict, Any, List
-from google.colab import userdata
+from google.colab import userdata, files
 from datetime import datetime
 import pytz
+import io
 
 # 1. Configuration and Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,7 +35,10 @@ def make_api_request(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         response = requests.post(API_URL, json=payload, headers=headers)
         response.raise_for_status()
-        return response.json()
+        json_response = response.json()
+        if 'error' in json_response or 'errors' in json_response:
+            handle_api_error(json_response)
+        return json_response
     except requests.RequestException as e:
         logger.error(f"API request failed: {str(e)}")
         if hasattr(e, 'response') and e.response is not None:
@@ -74,40 +78,40 @@ def format_summary(summary: Dict[str, Any]) -> str:
     """Format the summary data for printing."""
     return json.dumps(summary, indent=2)
 
-# 2.5 JSON to CSV Conversion (Updated)
-def json_to_csv(main_response: Dict[str, Any], city_county_summaries: List[Dict[str, Any]], filename: str):
-    """Convert JSON data to a readable CSV table and save to a file."""
+# 2.5 JSON to CSV Conversion
+def json_to_csv(main_response: Dict[str, Any], city_county_summaries: List[Dict[str, Any]]) -> pd.DataFrame:
+    """Convert JSON data to a readable DataFrame format."""
     if not main_response or not city_county_summaries:
         logger.warning("No data to convert to CSV.")
-        return
+        return pd.DataFrame()
 
-    # Create a list to hold all rows for the CSV
-    csv_rows = []
+    # 2.5.1 Initialize list to store rows
+    rows = []
 
-    # Add main summary
-    main_summary = main_response.get('summary', {})
-    for key, value in main_summary.items():
-        csv_rows.append(['Main Summary', key, str(value)])
+    # 2.5.2 Prepare column names
+    columns = ['Field'] + [summary.get('location', 'Unknown') for summary in city_county_summaries] + ['Total']
 
-    # Add city/county summaries
-    for summary in city_county_summaries:
-        location = summary.get('location', 'Unknown')
-        summary_data = summary.get('summary', {})
-        for key, value in summary_data.items():
-            csv_rows.append([f'{location} Summary', key, str(value)])
+    # 2.5.3 Populate the rows
+    for key in main_response.get('summary', {}):
+        row = [key]  # Start with the 'Field'
+        for summary in city_county_summaries:
+            row.append(summary.get('summary', {}).get(key, ''))
+        row.append(main_response['summary'][key])  # Add the 'Total'
+        rows.append(row)
 
-    # Add property data
-    properties = main_response.get('data', [])
-    for prop in properties:
-        for key, value in prop.items():
-            csv_rows.append(['Property Data', key, str(value)])
+    # 2.5.4 Create DataFrame
+    df = pd.DataFrame(rows, columns=columns)
 
-    # Create DataFrame
-    df = pd.DataFrame(csv_rows, columns=['Category', 'Field', 'Value'])
+    return df
 
-    # Save to CSV
-    df.to_csv(filename, index=False)
-    logger.info(f"CSV file saved: {filename}")
+# 2.6 API Error Handling
+def handle_api_error(response: Dict[str, Any]):
+    if 'error' in response:
+        print("API Error:")
+        print(json.dumps(response['error'], indent=2))
+    elif 'errors' in response:
+        print("API Errors:")
+        print(json.dumps(response['errors'], indent=2))
 
 # 3. Main Execution
 def main():
@@ -192,7 +196,7 @@ def main():
     print("\n3.6 Main Query Response:")
     print_api_response(main_response)
 
-      # 3.7 Generate CSV filename
+   # 3.7 Generate timestamp and filename components
     est_tz = pytz.timezone('US/Eastern')
     current_datetime = datetime.now(est_tz)
     date_str = current_datetime.strftime("%m%d%y")
@@ -202,21 +206,31 @@ def main():
     if len(query_params['cities']) > 2:
         cities_str += "_etc"
     
+    # 3.8 Generate CSV filename
     csv_filename = f"SummaryCount_{date_str}{time_str}_pre-foreclosures_{cities_str}.csv"
 
-    # 3.8 Save the data to CSV in a readable table format
-    json_to_csv(main_response, city_county_summaries, csv_filename)
-    print(f"Output saved to CSV as: {csv_filename}")
+    # 3.9 Create DataFrame in the new format
+    df = json_to_csv(main_response, city_county_summaries)
 
-    # 3.9 Prompt user to download the CSV file
+    # 3.10 Save DataFrame to CSV in Colab environment
+    df.to_csv(csv_filename, index=False)
+    print(f"CSV file saved in Colab: {csv_filename}")
+
+    # 3.11 Display CSV content preview
+    print("\nCSV Content Preview:")
+    print(df.head().to_string())
+
+    # 3.12 Download the CSV file
     try:
         files.download(csv_filename)
-        print(f"Download initiated for {csv_filename}. Please check your browser's download folder.")
+        print(f"\nDownload initiated for {csv_filename}.")
+        print("Your browser should prompt you to save the file or it may be automatically saved to your default downloads folder.")
+        print("If you don't see a prompt, check your browser's download manager or your default downloads folder.")
     except Exception as e:
-        print(f"An error occurred while trying to initiate the download: {str(e)}")
+        print(f"\nAn error occurred while trying to download the file: {str(e)}")
         print("You can manually download the file from the Colab file browser on the left sidebar.")
 
-    # 3.10 Save the full response to a JSON file with timestamp
+    # 3.13 Save the full response to a JSON file with timestamp
     json_filename = f"api_response_{date_str}{time_str}.json"
     with open(json_filename, 'w') as f:
         json.dump(main_response, f, indent=2)
