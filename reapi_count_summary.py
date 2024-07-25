@@ -1,5 +1,5 @@
 # Script Name: REAPI Property Search with Count, Summary, and Comprehensive CSV Output
-# Version: 7.2
+# Version: 7.4
 
 import requests
 import json
@@ -188,39 +188,46 @@ def main():
         print(format_summary(county_response.get('summary', {})))
         city_county_summaries.append({'location': f"{county} County", 'summary': county_response.get('summary', {})})
 
-    # 3.6 Main query (includes both count and summary)
-    main_payload = base_payload.copy()
-    main_payload["count"] = True
-    main_payload["summary"] = True
-    main_response = make_api_request(main_payload)
-    print("\n3.6 Main Query Response:")
-    print_api_response(main_response)
+    # 3.6 Summary query (includes both count and summary)
+    summary_payload = base_payload.copy()
+    summary_payload["count"] = True
+    summary_payload["summary"] = True
+    summary_response = make_api_request(summary_payload)
+    print("\n3.6 Summary Query Response:")
+    print_api_response(summary_response)
 
-   # 3.7 Generate timestamp and filename components
+    # 3.7 IDs only query
+    ids_payload = base_payload.copy()
+    ids_payload["ids_only"] = True
+    ids_response = make_api_request(ids_payload)
+    print("\n3.7 IDs Only Query Response:")
+    print_api_response(ids_response)
+
+    # 3.8 Generate timestamp and filename components
     est_tz = pytz.timezone('US/Eastern')
     current_datetime = datetime.now(est_tz)
     date_str = current_datetime.strftime("%m%d%y")
     time_str = current_datetime.strftime("%H%M")
-    
+
     cities_str = "_".join(query_params['cities'][:2])  # Use first two cities to keep filename short
     if len(query_params['cities']) > 2:
         cities_str += "_etc"
-    
-    # 3.8 Generate CSV filename
+
+    # 3.9 Generate CSV filename
     csv_filename = f"SummaryCount_{date_str}{time_str}_pre-foreclosures_{cities_str}.csv"
 
-    # 3.9 Create DataFrame in the new format
-    df = json_to_csv(main_response, city_county_summaries)
+    # 3.10 Create DataFrame in the new format
+    df = json_to_csv(summary_response, city_county_summaries)
 
-    # 3.10 Save DataFrame to CSV in Colab environment
+    # 3.11 Save DataFrame to CSV in Colab environment
     df.to_csv(csv_filename, index=False)
     print(f"CSV file saved in Colab: {csv_filename}")
 
-    # 3.11 Display CSV content preview
+    # 3.12 Display CSV content preview
     print("\nCSV Content Preview:")
     print(df.head().to_string())
 
-    # 3.12 Download the CSV file
+    # 3.13 Download the CSV file
     try:
         files.download(csv_filename)
         print(f"\nDownload initiated for {csv_filename}.")
@@ -230,11 +237,18 @@ def main():
         print(f"\nAn error occurred while trying to download the file: {str(e)}")
         print("You can manually download the file from the Colab file browser on the left sidebar.")
 
-    # 3.13 Save the full response to a JSON file with timestamp
-    json_filename = f"api_response_{date_str}{time_str}.json"
-    with open(json_filename, 'w') as f:
-        json.dump(main_response, f, indent=2)
-    logger.info(f"Full API response saved to {json_filename}")
+    # 3.14 Save the full summary response to a JSON file with timestamp
+    summary_json_filename = f"api_summary_response_{date_str}{time_str}.json"
+    with open(summary_json_filename, 'w') as f:
+        json.dump(summary_response, f, indent=2)
+    logger.info(f"Full summary API response saved to {summary_json_filename}")
+
+    # 3.15 Save property IDs to a separate JSON file
+    ids_json_filename = f"ids_only_{date_str}{time_str}.json"
+    property_ids = ids_response.get('data', [])
+    with open(ids_json_filename, 'w') as f:
+        json.dump(property_ids, f, indent=2)
+    logger.info(f"Property IDs saved to {ids_json_filename}")
 
 if __name__ == "__main__":
     main()
