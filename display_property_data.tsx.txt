@@ -1,0 +1,111 @@
+jsx
+import React from 'react';
+import { GoogleMap, LoadScript, Marker } from '@react-google-maps/api';
+
+const PropertyDetails = ({ data }) => {
+  const {
+    propertyInfo,
+    ownerInfo,
+    lastSale,
+    estimatedValue,
+    taxInfo,
+    schools,
+    demographics,
+    foreclosureInfo,
+  } = data;
+
+  const mapContainerStyle = {
+    width: '100%',
+    height: '400px',
+  };
+
+  const center = {
+    lat: propertyInfo.address.latitude,
+    lng: propertyInfo.address.longitude,
+  };
+
+  return (
+    <div className="property-details">
+      <h1>Property Details</h1>
+      
+      <section className="address">
+        <h2>Address</h2>
+        <p>{propertyInfo.address.label}</p>
+      </section>
+
+      <section className="property-info">
+        <h2>Property Information</h2>
+        <ul>
+          <li>Bedrooms: {propertyInfo.bedrooms}</li>
+          <li>Bathrooms: {propertyInfo.bathrooms}</li>
+          <li>Square Feet: {propertyInfo.livingSquareFeet}</li>
+          <li>Year Built: {propertyInfo.yearBuilt}</li>
+          <li>Property Type: {propertyInfo.propertyUse}</li>
+        </ul>
+      </section>
+
+      <section className="financial-info">
+        <h2>Financial Information</h2>
+        <ul>
+          <li>Estimated Value: ${estimatedValue.toLocaleString()}</li>
+          <li>Last Sale Price: ${lastSale.saleAmount.toLocaleString()}</li>
+          <li>Last Sale Date: {new Date(lastSale.saleDate).toLocaleDateString()}</li>
+          <li>Tax Assessment: ${taxInfo.assessedValue.toLocaleString()}</li>
+        </ul>
+      </section>
+
+      <section className="owner-info">
+        <h2>Owner Information</h2>
+        <p>{ownerInfo.owner1FullName}</p>
+        <p>Ownership Length: {ownerInfo.ownershipLength} months</p>
+      </section>
+
+      <section className="schools">
+        <h2>Nearby Schools</h2>
+        <ul>
+          {schools.map((school, index) => (
+            <li key={index}>
+              {school.name} - {school.grades} (Rating: {school.rating}/10)
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section className="demographics">
+        <h2>Area Demographics</h2>
+        <ul>
+          <li>Median Income: ${demographics.medianIncome.toLocaleString()}</li>
+          <li>Suggested Rent: ${demographics.suggestedRent}/month</li>
+        </ul>
+      </section>
+
+      {foreclosureInfo.length > 0 && (
+        <section className="foreclosure">
+          <h2>Foreclosure Information</h2>
+          <ul>
+            {foreclosureInfo.map((info, index) => (
+              <li key={index}>
+                Case Number: {info.caseNumber} - Recording Date: {new Date(info.recordingDate).toLocaleDateString()}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <section className="map">
+        <h2>Property Location</h2>
+        <LoadScript googleMapsApiKey="YOUR_GOOGLE_MAPS_API_KEY">
+          <GoogleMap
+            mapContainerStyle={mapContainerStyle}
+            center={center}
+            zoom={15}
+          >
+            <Marker position={center} />
+          </GoogleMap>
+        </LoadScript>
+      </section>
+    </div>
+  );
+};
+
+export default PropertyDetails;
