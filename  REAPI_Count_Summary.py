@@ -8,7 +8,7 @@ import csv
 import pandas as pd
 from typing import Dict, Any, List
 from google.colab import userdata, files
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import io
 
@@ -113,41 +113,42 @@ def handle_api_error(response: Dict[str, Any]):
         print("API Errors:")
         print(json.dumps(response['errors'], indent=2))
 
+# 2.7 Establish 11 months ago (change this by updating the timedelta)
+eleven_months_ago = (datetime.now() - timedelta(days=11*30)).strftime('%Y-%m-%d')
+
 # 3. Main Execution
-def main():
-    # 3.1 Define base payload
+def main():     
+    # 3.1 Define base payload    
     base_payload = {
         "state": "FL",
         "corporate_owned": False,
         "pre_foreclosure": True,
         "search_range": "3_MONTH",
+        "reo": False,
         "and": [
             {
                 "or": [
-                    {"city": "Green Cove Springs"},
-                    {"city": "Orange Park"},
-                    {"city": "Jacksonville Beach"},
-                    {"city": "Jacksonville"}
-                ]
-            },
-            {
-                "or": [
                     {"county": "Duval"},
-                    {"county": "St Johns"},
+                    {"county": "St. Johns"},
                     {"county": "Clay"},
                     {"county": "Baker"},
-                    {"county": "Orange"}
+                    {"county": "Nassau"}
                 ]
             },
             {
                 "or": [
                     {"property_type": "SFR"},
-                    {"property_type": "CONDO"}
+                    {"property_type": "CONDO"},
+                    {"property_type": "MFR"},
+                    {"property_type": "MOBILE"},
+                    {"property_type": "LAND"}
                 ]
             }
+        ],
+        "exclude": [
+            {"last_sale_date": eleven_months_ago, "last_sale_date_operator": "gte"}
         ]
     }
-
     # 3.2 Extract query parameters
     query_params = extract_query_params(base_payload)
 
