@@ -1,5 +1,5 @@
 # Script Name: Single Record SkipTrace Processing for Colab with Enhanced Features
-# Version: 3.2
+# Version: 3.3.5 (logging improvement 1)
 
 # 1. Imports and Configuration
 # 1.1 Import required libraries
@@ -96,8 +96,6 @@ def process_record(record: Dict[str, Any], api_key: str) -> Dict[str, Any]:
         return response.json()
     except requests.exceptions.RequestException as e:
         logger.error(f"API request failed: {str(e)}")
-        logger.error(f"Request payload: {json.dumps(record, indent=2)}")
-        logger.error(f"Response content: {response.text if response else 'No response'}")
         return None
 
 # 2.4 Save result to file
@@ -180,11 +178,13 @@ def main() -> None:
             if result is None:
                 retry_queue.append((index, skip_trace_input))
                 df.at[index, 'API_Response'] = 'Error'
+                logger.info(f"Record {index + 1}: ❌ Error")
             elif result:
                 results.append(result)
                 df.at[index, 'API_Response'] = 'Success'
                 df.at[index, 'API_Hit'] = 'identity' in result
                 save_result(result, row['Property Address'].split(',')[0].strip())
+                logger.info(f"Record {index + 1}: ✅ Success {'🎯' if 'identity' in result else ''}")
             time.sleep(REQUEST_DELAY)
 
         # 3.8 Process retry queue
@@ -196,6 +196,9 @@ def main() -> None:
                 df.at[index, 'API_Response'] = 'Success'
                 df.at[index, 'API_Hit'] = 'identity' in result
                 save_result(result, df.at[index, 'Property Address'].split(',')[0].strip())
+                logger.info(f"Retry Record {index + 1}: ✅ Success {'🎯' if 'identity' in result else ''}")
+            else:
+                logger.info(f"Retry Record {index + 1}: ❌ Failed")
             time.sleep(REQUEST_DELAY)
 
         # 3.9 Save final results
