@@ -1,5 +1,5 @@
 # Script Name: Single Record SkipTrace Processing for Colab with Enhanced Features
-# Version: 3.3.5 (logging improvement 1)
+# Version: 3.3.6 (logging improvement 2)
 
 # 1. Imports and Configuration
 # 1.1 Import required libraries
@@ -93,7 +93,13 @@ def process_record(record: Dict[str, Any], api_key: str) -> Dict[str, Any]:
             time.sleep(RETRY_DELAY)
             return None  # Indicate need for retry
         response.raise_for_status()
-        return response.json()
+        json_response = response.json()
+        # Check if the response was successful
+        if json_response.get("responseMessage") == "Successful":
+            json_response["is_hit"] = True
+        else:
+            json_response["is_hit"] = False
+        return json_response
     except requests.exceptions.RequestException as e:
         logger.error(f"API request failed: {str(e)}")
         return None
@@ -121,6 +127,18 @@ def validate_input_data(df: pd.DataFrame) -> bool:
             logger.error(f"Missing required column: {column}")
             return False
     return True
+
+# 2.6 Print Summary
+def print_summary(df: pd.DataFrame, results: List[Dict[str, Any]]) -> None:
+    """Print a summary of the processing results."""
+    total_properties = len(df)
+    processed_properties = len(results)
+    successful_hits = sum(1 for result in results if result.get("is_hit", False))
+    
+    logger.info("Processing Summary:")
+    logger.info(f"Total properties to be processed: {total_properties}")
+    logger.info(f"Properties processed: {processed_properties}")
+    logger.info(f"Properties with successful hit: {successful_hits}")
 
 # 3. Main Execution
 def main() -> None:
@@ -182,9 +200,9 @@ def main() -> None:
             elif result:
                 results.append(result)
                 df.at[index, 'API_Response'] = 'Success'
-                df.at[index, 'API_Hit'] = 'identity' in result
+                df.at[index, 'API_Hit'] = result.get("is_hit", False)
                 save_result(result, row['Property Address'].split(',')[0].strip())
-                logger.info(f"Record {index + 1}: ✅ Success {'🎯' if 'identity' in result else ''}")
+                logger.info(f"Record {index + 1}: ✅ Success {'🎯' if result.get('is_hit', False) else ''}")
             time.sleep(REQUEST_DELAY)
 
         # 3.8 Process retry queue
@@ -223,9 +241,13 @@ def main() -> None:
         files.download(colab_summary_path)
 
         # 3.12 Print summary
+        print_summary(df, results)
+
         logger.info(f"Processed {len(results)} records successfully.")
         logger.info(f"Failed to process {len(retry_queue) - (len(results) - len(df))} records after retry.")
 
+    except Exception as e:
+        logger.error(f"An error occurred: {str(e)}")
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
 
