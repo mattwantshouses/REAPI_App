@@ -1,5 +1,5 @@
 # Script Name: REAPI Property Detail Retrieval with Pagination and CSV Output
-# Version: 1.7
+# Version: 1.8
 
 import requests
 import json
@@ -124,7 +124,35 @@ def main():
     # 3.2 Retrieve property details with pagination
     property_details = paginated_property_detail_retrieval(property_ids)
 
-    # 3.6 Generate timestamp and filename components
+    # 3.2 Retrieve property details with pagination
+property_details = paginated_property_detail_retrieval(property_ids)
+
+# 3.3 Create preview of first 5 responses
+preview_data = property_details[:5]
+
+# 3.4 Function to flatten nested JSON for preview
+def flatten_for_preview(d):
+    flat = {}
+    for key, value in d.items():
+        if isinstance(value, dict):
+            for subkey, subvalue in value.items():
+                flat[f"{key}_{subkey}"] = subvalue
+        else:
+            flat[key] = value
+    return flat
+
+# 3.5 Flatten preview data
+flattened_preview = [flatten_for_preview(item) for item in preview_data]
+
+# 3.6 Create DataFrame from flattened preview data
+preview_df = pd.DataFrame(flattened_preview)
+
+# 3.7 Print preview
+print("\nPreview of first 5 responses:")
+print(preview_df.to_string())
+
+
+    # 3.8 Generate timestamp and filename components
     est_tz = pytz.timezone('US/Eastern')
     current_datetime = datetime.now(est_tz)
     date_str = current_datetime.strftime("%m%d%y")
