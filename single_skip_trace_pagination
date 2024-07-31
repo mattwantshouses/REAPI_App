@@ -1,5 +1,5 @@
 # Script Name: Single Record SkipTrace Processing for Colab with Enhanced Features
-# Version: 3.3.6 (logging improvement 2)
+# Version: 3.5 (csv output, filename improvements)
 
 # 1. Imports and Configuration
 # 1.1 Import required libraries
@@ -10,6 +10,9 @@ import logging
 from typing import Dict, Any, List, Optional
 import pandas as pd
 import requests
+import csv
+import pandas as pd
+import glob 
 from tqdm import tqdm
 from google.colab import auth, drive, files, userdata
 from google.auth import default
@@ -106,14 +109,14 @@ def process_record(record: Dict[str, Any], api_key: str) -> Dict[str, Any]:
 
 # 2.4 Save result to file
 def save_result(result: Dict[str, Any], street_address: str) -> None:
-    """Save a single result to a JSON file in both Google Drive and Colab environment."""
-    filename = f"REapi_Skip_{street_address.replace(' ', '_')}.json"
+    """Save a single result to a CSV file in both Google Drive and Colab environment."""
+    filename = f"REapi_Skip_{street_address.replace(' ', '_')}.csv"
     drive_path = os.path.join(OUTPUT_FOLDER, filename)
     colab_path = os.path.join(COLAB_OUTPUT_FOLDER, filename)
     
+    df = pd.DataFrame([flatten_dict(result)])
     for path in [drive_path, colab_path]:
-        with open(path, 'w') as f:
-            json.dump(result, f, indent=2)
+        df.to_csv(path, index=False)
         logger.info(f"Saved result to {path}")
 
 # 2.5 Validate input data
@@ -139,6 +142,30 @@ def print_summary(df: pd.DataFrame, results: List[Dict[str, Any]]) -> None:
     logger.info(f"Total properties to be processed: {total_properties}")
     logger.info(f"Properties processed: {processed_properties}")
     logger.info(f"Properties with successful hit: {successful_hits}")
+
+# 2.7 Print Progress
+def print_progress(processed: int, total: int, hits: int) -> None:
+    """Print progress of the processing."""
+    percentage = (processed / total) * 100
+    logger.info(f"{total} Records | {processed} Records Processed | HITs {hits} out of {processed}")
+    logger.info(f"{percentage:.2f}% Complete")
+
+    # 2.8 Flatten dictionary
+def flatten_dict(d, parent_key='', sep='.'):
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        elif isinstance(v, list):
+            for i, item in enumerate(v):
+                if isinstance(item, dict):
+                    items.extend(flatten_dict(item, f"{new_key}{sep}{i}", sep=sep).items())
+                else:
+                    items.append((f"{new_key}{sep}{i}", item))
+        else:
+            items.append((new_key, v))
+    return dict(items)
 
 # 3. Main Execution
 def main() -> None:
@@ -189,7 +216,11 @@ def main() -> None:
         # 3.7 Process records
         results: List[Dict[str, Any]] = []
         retry_queue: List[Dict[str, Any]] = []
-        for index, row in tqdm(df.iterrows(), total=len(df), desc="Processing records"):
+        total_records = len(df)
+        processed_records = 0
+        hits = 0
+        for index, row in tqdm(df.iterrows(), total=total_records, desc="Processing records"):
+            logger.info(f"Processing Record {index + 1}: ")
             skip_trace_input = prepare_skip_trace_input(row)
             df.at[index, 'API_Sent'] = True
             result = process_record(skip_trace_input, API_KEY)
@@ -203,7 +234,12 @@ def main() -> None:
                 df.at[index, 'API_Hit'] = result.get("is_hit", False)
                 save_result(result, row['Property Address'].split(',')[0].strip())
                 logger.info(f"Record {index + 1}: ✅ Success {'🎯' if result.get('is_hit', False) else ''}")
+                if result.get("is_hit", False):
+                    hits += 1
+            processed_records += 1
+            print_progress(processed_records, total_records, hits)
             time.sleep(REQUEST_DELAY)
+
 
         # 3.8 Process retry queue
         logger.info(f"Processing {len(retry_queue)} records in retry queue...")
@@ -220,20 +256,20 @@ def main() -> None:
             time.sleep(REQUEST_DELAY)
 
         # 3.9 Save final results
-        current_date = datetime.now().strftime("%m%d%y")
-        final_output = os.path.join(OUTPUT_FOLDER, f'REapi_Skip_Results_{current_date}.json')
-        colab_final_output = os.path.join(COLAB_OUTPUT_FOLDER, f'REapi_Skip_Results_{current_date}.json')
+        current_datetime = datetime.now().strftime("%m%d%y_%H%M%S")
+        final_output = os.path.join(OUTPUT_FOLDER, f'REapi_Skip_Results_{current_datetime}.csv')
+        colab_final_output = os.path.join(COLAB_OUTPUT_FOLDER, f'REapi_Skip_Results_{current_datetime}.csv')
+        df_results = pd.DataFrame([flatten_dict(result) for result in results])
         for path in [final_output, colab_final_output]:
-            with open(path, 'w') as f:
-                json.dump(results, f, indent=2)
+            df_results.to_csv(path, index=False)
             logger.info(f"All results saved to {path}")
 
         # 3.10 Save and download summary results
-        summary_filename = f"{os.path.splitext(os.path.basename(selected_file))[0]}_Skip_Results_Summary_{current_date}.xlsx"
+        summary_filename = f"{os.path.splitext(os.path.basename(selected_file))[0]}_Skip_Results_Summary_{current_datetime}.csv"
         summary_path = os.path.join(OUTPUT_FOLDER, summary_filename)
         colab_summary_path = os.path.join(COLAB_OUTPUT_FOLDER, summary_filename)
         for path in [summary_path, colab_summary_path]:
-            df.to_excel(path, index=False)
+            df.to_csv(path, index=False)
             logger.info(f"Summary results saved to {path}")
 
         # 3.11 Prompt user to download files
