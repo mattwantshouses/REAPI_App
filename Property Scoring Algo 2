@@ -1,5 +1,5 @@
-# Merged Property Scoring Algorithm
-# Version 2.1
+# Property Scoring Algorithm
+# Version 2.6
 
 # 1. Imports
 # 1.1 Standard library imports
@@ -22,7 +22,6 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("property_scoring.log"),
         logging.StreamHandler()
     ]
 )
@@ -64,11 +63,11 @@ def load_data(file_path: str) -> pd.DataFrame:
             json_data = json.load(f)
         # Extract the 'data' field from each item
         if isinstance(json_data, list):
-            data = [item['data'] for item in json_data if 'data' in item]
+            data = [item.get('data', item) for item in json_data]
         elif isinstance(json_data, dict) and 'data' in json_data:
             data = [json_data['data']]
         else:
-            raise ValueError("Unexpected JSON structure")
+            data = [json_data]
         return pd.DataFrame(data)
     raise ValueError("Unsupported file format. Please use CSV or JSON.")
 
@@ -76,16 +75,16 @@ def load_data(file_path: str) -> pd.DataFrame:
 def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
     """Prepare the data by handling missing values and converting date fields."""
     logging.info("Preparing data")
-    
+
     # 4.1 Handle missing values
     df = df.fillna(0)
-    
+
     # 4.2 Convert date fields
     date_columns = ['lastSaleDate', 'lastUpdateDate']
     for col in date_columns:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors='coerce')
-    
+
     # 4.3 Create derived features
     df['days_since_last_sale'] = (
         (datetime.now() - df['lastSaleDate']).dt.days
@@ -93,85 +92,113 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
     )
     df['is_absentee_owner'] = df['absenteeOwner'].astype(int) if 'absenteeOwner' in df.columns else 0
     df['is_vacant'] = df['vacant'].astype(int) if 'vacant' in df.columns else 0
-    
+
     return df
 
 # 5. Scoring System
 # 5.1 Individual Scoring Functions
 def equity_score(equity_percent: float) -> float:
     """Calculate the equity score based on equity percentage."""
-    return np.clip(equity_percent / 100, 0, 1)
+    try:
+        return np.clip(float(equity_percent) / 100, 0, 1)
+    except (ValueError, TypeError):
+        logging.warning(f"Invalid equity_percent value: {equity_percent}")
+        return 0
 
 def ownership_length_score(days: int) -> float:
     """Calculate the ownership length score."""
-    return 1 - np.sin(np.clip(days / 3650, 0, np.pi/2))
+    try:
+        return 1 - np.sin(np.clip(float(days) / 3650, 0, np.pi/2))
+    except (ValueError, TypeError):
+        logging.warning(f"Invalid days value: {days}")
+        return 0
 
 def calculate_additional_flags_score(row: pd.Series) -> float:
     """Calculate the score based on additional flags."""
     flags = ['vacant', 'taxLien', 'quitClaim', 'sheriffsDeed', 'spousalDeath', 'trusteeSale']
-    flag_count = sum(row.get(flag, False) for flag in flags)
+    flag_count = sum(1 for flag in flags if str(row.get(flag, '')).lower() in ('true', '1', 'yes', 'y'))
     
     if flag_count >= 2:
         return 100
     if flag_count == 1:
         return 50
     return 0
-
 def calculate_financial_distress_score(row: pd.Series) -> float:
     """Calculate the financial distress score."""
     factors = [
-        row.get('taxLien', False),
-        row.get('preForeclosure', False),
-        row.get('quitClaim', False),
-        row.get('sheriffsDeed', False),
-        row.get('trusteeSale', False),
-        row.get('foreclosureStatus', 'None') != 'None',
-        row.get('daysInForeclosure', 0) > 0
+        str(row.get('taxLien', '')).lower() in ('true', '1', 'yes', 'y'),
+        str(row.get('preForeclosure', '')).lower() in ('true', '1', 'yes', 'y'),
+        str(row.get('quitClaim', '')).lower() in ('true', '1', 'yes', 'y'),
+        str(row.get('sheriffsDeed', '')).lower() in ('true', '1', 'yes', 'y'),
+        str(row.get('trusteeSale', '')).lower() in ('true', '1', 'yes', 'y'),
+        str(row.get('foreclosureStatus', 'None')) != 'None',
+        int(row.get('daysInForeclosure', 0)) > 0
     ]
-    
+
     return (sum(factors) / len(factors)) * 100
 
 def calculate_mls_score(row: pd.Series) -> float:
     """Calculate the MLS score."""
-    days_on_market = row.get('daysOnMarket', 0)
-    mls_total_updates = row.get('mlsTotalUpdates', 0)
-    
-    dom_score = max(0, 100 - days_on_market)
-    update_score = min(100, mls_total_updates * 20)
-    
-    return (dom_score + update_score) / 2
+    try:
+        days_on_market = float(row.get('daysOnMarket', 0))
+        mls_total_updates = float(row.get('mlsTotalUpdates', 0))
+        
+        dom_score = max(0, 100 - days_on_market)
+        update_score = min(100, mls_total_updates * 20)
+        
+        return (dom_score + update_score) / 2
+    except (ValueError, TypeError) as e:
+        logging.warning(f"Error calculating MLS score: {str(e)}")
+        return 0
 
 def calculate_market_attractiveness_score(row: pd.Series) -> float:
     """Calculate the market attractiveness score."""
-    return row.get('schoolsRating', 50)
+    try:
+        schools_rating = float(row.get('schoolsRating', 50))
+        return min(max(schools_rating, 0), 100)  # Ensure the score is between 0 and 100
+    except (ValueError, TypeError):
+        logging.warning(f"Invalid schoolsRating value: {row.get('schoolsRating')}")
+        return 50
 
 def calculate_property_condition_score(row: pd.Series) -> float:
     """Calculate the property condition score."""
-    year_built = row.get('yearBuilt', 1900)
-    current_year = pd.Timestamp.now().year
-    age_score = max(0, 100 - (current_year - year_built))
-    
-    assessed_value = row.get('assessedValue', 0)
-    market_value = row.get('marketValue', 0)
-    
-    value_score = min(100, (assessed_value / market_value) * 100) if market_value > 0 else 50
-    
-    return (age_score + value_score) / 2
+    try:
+        year_built = int(row.get('yearBuilt', 1900))
+        current_year = pd.Timestamp.now().year
+        age_score = max(0, 100 - (current_year - year_built))
+        
+        assessed_value = float(row.get('assessedValue', 0))
+        market_value = float(row.get('marketValue', 0))
+        
+        value_score = min(100, (assessed_value / market_value) * 100) if market_value > 0 else 50
+        
+        return (age_score + value_score) / 2
+    except (ValueError, TypeError) as e:
+        logging.warning(f"Error calculating property condition score: {str(e)}")
+        return 0
 
 # 5.2 Main Scoring Function
 def calculate_property_scores(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate all property scores based on various factors."""
     logging.info("Calculating property scores")
     
-    df['additional_flags_score'] = df.apply(calculate_additional_flags_score, axis=1)
-    df['financial_distress_score'] = df.apply(calculate_financial_distress_score, axis=1)
-    df['equity_score'] = df['equityPercent'].fillna(0).clip(0, 100)
-    df['ownership_score'] = df['days_since_last_sale'].apply(ownership_length_score) * 100
-    df['mls_score'] = df.apply(calculate_mls_score, axis=1)
-    df['market_attractiveness_score'] = df.apply(calculate_market_attractiveness_score, axis=1)
-    df['property_condition_score'] = df.apply(calculate_property_condition_score, axis=1)
-    
-    # Calculate total score
+    # 5.2.1 Calculate individual scores
+    score_functions = {
+        'additional_flags_score': calculate_additional_flags_score,
+        'financial_distress_score': calculate_financial_distress_score,
+        'mls_score': calculate_mls_score,
+        'market_attractiveness_score': calculate_market_attractiveness_score,
+        'property_condition_score': calculate_property_condition_score
+    }
+
+    for col_name, score_func in score_functions.items():
+        df[col_name] = df.apply(lambda row: safe_score_calculation(row, score_func, col_name), axis=1)
+
+    # 5.2.2 Handle equity and ownership scores
+    df['equity_score'] = df['equityPercent'].fillna(0).astype(float).apply(lambda x: safe_score_calculation(x, equity_score, 'equity_score')) * 100
+    df['ownership_score'] = df['days_since_last_sale'].fillna(0).astype(float).apply(lambda x: safe_score_calculation(x, ownership_length_score, 'ownership_score')) * 100
+
+    # 5.2.3 Calculate total score
     weights = {
         'additional_flags': 0.20,
         'financial_distress': 0.25,
@@ -183,21 +210,29 @@ def calculate_property_scores(df: pd.DataFrame) -> pd.DataFrame:
     }
     
     df['total_score'] = sum(
-        weights[key] * df[f'{key}_score']
+        weights[key] * df[f'{key}_score'].astype(float)
         for key in weights
     )
     
-    # Normalize total score to 0-100 range
+    # 5.2.4 Normalize total score to 0-100 range
     df['total_score'] = df['total_score'].clip(0, 100)
     df['rank'] = df['total_score'].rank(method='dense', ascending=False)
     
     return df
 
+# Helper function for safe score calculation
+def safe_score_calculation(input_data, score_function, score_name):
+    try:
+        return score_function(input_data)
+    except Exception as e:
+        logging.error(f"Error calculating {score_name}: {str(e)}")
+        return 0
+
 # 6. Analysis
 def perform_analysis(df: pd.DataFrame) -> Tuple[str, pd.DataFrame]:
     """Perform analysis on the scored data."""
     logging.info("Performing analysis")
-    
+
     # 6.1 Rank properties
     df['rank'] = df['total_score'].rank(method='dense', ascending=False)
 
@@ -205,9 +240,9 @@ def perform_analysis(df: pd.DataFrame) -> Tuple[str, pd.DataFrame]:
     top_percent = 20
     top_threshold = df['total_score'].quantile(1 - top_percent/100)
     df['is_top_prospect'] = df['total_score'] >= top_threshold
-    
+
     top_prospects = df[df['is_top_prospect']].sort_values('total_score', ascending=False)
-    
+
     # 6.3 Generate report
     report = f"""
     Analysis Report:
@@ -216,7 +251,7 @@ def perform_analysis(df: pd.DataFrame) -> Tuple[str, pd.DataFrame]:
     Average score: {df['total_score'].mean():.2f}
     Median score: {df['total_score'].median():.2f}
     """
-    
+
     return report, top_prospects
 
 # 7. Visualization
@@ -251,16 +286,17 @@ def save_results(df: pd.DataFrame, report: str, base_filename: str) -> None:
     json_output_file = f"{base_filename}_analyzed.json"
     csv_output_file = f"{base_filename}_analyzed.csv"
 
-    # Sort the DataFrame by 'rank' in ascending order
+    # 8.2.1 Sort the DataFrame by 'rank' in ascending order
     df_sorted = df.sort_values('rank', ascending=True)
 
-    # Save as JSON
+    # 8.2.2 Save as JSON
     with open(json_output_file, 'w') as f:
         json.dump(json.loads(df_sorted.to_json(orient='records')), f, indent=2)
 
-    # Save as CSV
+    # 8.2.3 Save as CSV
     df_sorted.to_csv(csv_output_file, index=False)
 
+    # 8.3 Log completion and prompt for downloads
     logging.info(f"Analysis complete. Results saved to {json_output_file} and {csv_output_file}")
     print(f"Please download the following files:")
     print(f"1. {json_output_file}")
@@ -269,7 +305,7 @@ def save_results(df: pd.DataFrame, report: str, base_filename: str) -> None:
     print("4. equity_vs_ownership.png")
     print("5. analysis_report.txt")
 
-    # Prompt user to download all files
+    # 8.4 Prompt user to download all files
     files.download(json_output_file)
     files.download(csv_output_file)
     files.download('score_distribution.png')
@@ -277,6 +313,7 @@ def save_results(df: pd.DataFrame, report: str, base_filename: str) -> None:
     files.download('analysis_report.txt')
 
 # 9. Additional Utility Functions
+# 9.1 Describe Scores
 def describe_scores(df: pd.DataFrame) -> pd.DataFrame:
     """Generate a statistical description of the calculated scores."""
     score_columns = [
@@ -286,6 +323,7 @@ def describe_scores(df: pd.DataFrame) -> pd.DataFrame:
     ]
     return df[score_columns].describe()
 
+# 9.2 Export Top Prospects
 def export_top_prospects(df: pd.DataFrame, output_file: str, top_n: int = 100) -> None:
     """Export the top N prospects to a separate file."""
     top_prospects = df.nsmallest(top_n, 'rank')
@@ -293,6 +331,7 @@ def export_top_prospects(df: pd.DataFrame, output_file: str, top_n: int = 100) -
     logging.info(f"Top {top_n} prospects exported to {output_file}")
 
 # 10. Data Validation Functions
+# 10.1 Validate Input Data
 def validate_input_data(df: pd.DataFrame) -> bool:
     """Validate the input data to ensure all required fields are present."""
     required_columns = [
@@ -300,28 +339,22 @@ def validate_input_data(df: pd.DataFrame) -> bool:
         'taxLien', 'preForeclosure', 'quitClaim', 'sheriffsDeed', 'trusteeSale'
     ]
     missing_columns = [col for col in required_columns if col not in df.columns]
-    
+
     if missing_columns:
         logging.warning(f"Missing required columns: {', '.join(missing_columns)}")
         return False
     return True
 
-def handle_missing_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Handle missing data in the dataframe."""
-    # Fill numeric columns with 0
-    numeric_columns = df.select_dtypes(include=[np.number]).columns
-    df[numeric_columns] = df[numeric_columns].fillna(0)
-    
-    # Fill categorical columns with 'Unknown'
+# 10.2.2 Fill categorical columns with 'Unknown'
     categorical_columns = df.select_dtypes(include=['object']).columns
     df[categorical_columns] = df[categorical_columns].fillna('Unknown')
-    
-    # Fill date columns with a default date
+
+    # 10.2.3 Fill date columns with a default date
     date_columns = ['lastSaleDate', 'lastUpdateDate']
     for col in date_columns:
         if col in df.columns:
             df[col] = df[col].fillna(pd.Timestamp('1900-01-01'))
-    
+
     return df
 
 # 11. Main Execution Function
@@ -359,17 +392,17 @@ def main() -> None:
         base_filename = os.path.splitext(selected_file)[0]
         save_results(df, report, base_filename)
 
-        # 11.9 Additional Outputs
+        # 11.9 Additional Analysis
         score_description = describe_scores(df)
         print("\nScore Statistics:")
         print(score_description)
 
         # 11.10 Export Top Prospects
-        export_top_prospects(df, f"{base_filename}_top_100_prospects.csv")
+        top_prospects_file = f"{base_filename}_top_prospects.csv"
+        export_top_prospects(df, top_prospects_file)
 
-        logging.info("Script execution completed successfully")
     except Exception as e:
-        logging.error(f"An error occurred: {str(e)}")
+        logging.error(f"An error occurred: {str(e)}", exc_info=True)
         print(f"An error occurred: {str(e)}")
         print("Please check the logs for more details.")
 
