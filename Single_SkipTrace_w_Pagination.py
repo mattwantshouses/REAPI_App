@@ -1,5 +1,6 @@
-# Script Name: Single Record SkipTrace Processing for Colab with Enhanced Features
-# Version: 3.5 (csv output, filename improvements)
+# Script Name: Single_SkipTrace_w_Pagination.py
+# Version: 3.7 (csv output, improved filenames)
+# (next iteration - fix logging to show totals summary at bottom)
 
 # 1. Imports and Configuration
 # 1.1 Import required libraries
@@ -12,7 +13,7 @@ import pandas as pd
 import requests
 import csv
 import pandas as pd
-import glob 
+import glob
 from tqdm import tqdm
 from google.colab import auth, drive, files, userdata
 from google.auth import default
@@ -35,12 +36,12 @@ REQUEST_DELAY = 0.1  # Seconds to wait between requests
 def select_file() -> Optional[str]:
     """Present a list of files for the user to select or upload a new file."""
     files_list = [f for f in os.listdir() if f.endswith(('.json', '.txt', '.csv', '.xlsx', '.xls'))]
-    
+
     print("Available files:")
     for i, file in enumerate(files_list, 1):
         print(f"{i}. {file}")
     print(f"{len(files_list) + 1}. Upload a new file")
-    
+
     while True:
         try:
             selection = int(input(f"Enter your choice (1-{len(files_list) + 1}): "))
@@ -88,7 +89,7 @@ def process_record(record: Dict[str, Any], api_key: str) -> Dict[str, Any]:
         "Content-Type": 'application/json',
         "x-api-key": api_key
     }
-    
+
     try:
         response = requests.post(API_URL, headers=headers, json=record, timeout=30)
         if response.status_code == 429:  # Too Many Requests
@@ -113,7 +114,7 @@ def save_result(result: Dict[str, Any], street_address: str) -> None:
     filename = f"REapi_Skip_{street_address.replace(' ', '_')}.csv"
     drive_path = os.path.join(OUTPUT_FOLDER, filename)
     colab_path = os.path.join(COLAB_OUTPUT_FOLDER, filename)
-    
+
     df = pd.DataFrame([flatten_dict(result)])
     for path in [drive_path, colab_path]:
         df.to_csv(path, index=False)
@@ -137,7 +138,7 @@ def print_summary(df: pd.DataFrame, results: List[Dict[str, Any]]) -> None:
     total_properties = len(df)
     processed_properties = len(results)
     successful_hits = sum(1 for result in results if result.get("is_hit", False))
-    
+
     logger.info("Processing Summary:")
     logger.info(f"Total properties to be processed: {total_properties}")
     logger.info(f"Properties processed: {processed_properties}")
