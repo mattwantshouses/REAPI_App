@@ -1,5 +1,5 @@
-# Script Name: REAPI Property Search with Count, Summary, and Comprehensive CSV Output
-# Version: 7.4
+# Script Name:  REAPI_Count_Summary_aka_CSID
+# Version: 7.5 (add exclude functionality + last sale date)
 
 import requests
 import json
@@ -11,6 +11,8 @@ from google.colab import userdata, files
 from datetime import datetime, timedelta
 import pytz
 import io
+
+
 
 # 1. Configuration and Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -117,14 +119,15 @@ def handle_api_error(response: Dict[str, Any]):
 eleven_months_ago = (datetime.now() - timedelta(days=11*30)).strftime('%Y-%m-%d')
 
 # 3. Main Execution
-def main():     
-    # 3.1 Define base payload    
+def main():
+    # 3.1 Define base payload
     base_payload = {
         "state": "FL",
         "corporate_owned": False,
         "pre_foreclosure": True,
         "search_range": "3_MONTH",
         "reo": False,
+        "mls_pending": False,
         "and": [
             {
                 "or": [
