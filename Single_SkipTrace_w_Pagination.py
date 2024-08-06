@@ -1,5 +1,5 @@
-# Script Name: Single_SkipTrace_w_Pagination.py
-# Version: 3.7 (csv output, improved filenames)
+# Script Name: Single Record SkipTrace Processing for Colab with Enhanced Features
+# Version: 3.8 (Flexibility with addresses. Will take one cell or multiple cells.)
 # (next iteration - fix logging to show totals summary at bottom)
 
 # 1. Imports and Configuration
@@ -62,24 +62,61 @@ def select_file() -> Optional[str]:
 # 2.2 Prepare skip trace input
 def prepare_skip_trace_input(row: pd.Series) -> Dict[str, Any]:
     """Prepare a single row for the SkipTrace API input."""
-    return {
-        "first_name": row['Owner 1 First Name'],
-        "last_name": row['Owner 1 Last Name'],
-        "address": row['Property Address'].split(',')[0].strip(),
-        "city": row['Property Address'].split(',')[1].strip() if len(row['Property Address'].split(',')) > 1 else "",
-        "state": row['Property Address'].split(',')[2].split()[0] if len(row['Property Address'].split(',')) > 2 else "",
-        "zip": row['Property Address'].split(',')[2].split()[1] if len(row['Property Address'].split(',')) > 2 and len(row['Property Address'].split(',')[2].split()) > 1 else "",
-        "mail_address": row['Mailing Address'].split(',')[0].strip(),
-        "mail_city": row['Mailing Address'].split(',')[1].strip() if len(row['Mailing Address'].split(',')) > 1 else "",
-        "mail_state": row['Mailing Address'].split(',')[2].split()[0] if len(row['Mailing Address'].split(',')) > 2 else "",
-        "mail_zip": row['Mailing Address'].split(',')[2].split()[1] if len(row['Mailing Address'].split(',')) > 2 and len(row['Mailing Address'].split(',')[2].split()) > 1 else ""
-    }
-    # return { #this will process the complete address
-    #     "first_name": row['Owner 1 First Name'],
-    #     "last_name": row['Owner 1 Last Name'],
-    #     "address": row['Property Address'],
-    #     "mail_address": row['Mailing Address']
-    # }
+    # Determine which scenario we're dealing with
+    scenario_1 = 'Property Address' in row.index and 'Mailing Address' in row.index
+    scenario_2 = all(col in row.index for col in ['Property Street', 'Property City', 'Property State', 'Property Zip',
+                                                  'Mailing Street', 'Mailing City', 'Mailing State', 'Mailing Zip'])
+
+    if scenario_1:
+        # Handle Scenario 1: Full addresses in single columns
+        property_parts = row['Property Address'].split()
+        mailing_parts = row['Mailing Address'].split()
+        
+        property_street = ' '.join(property_parts[:-3])
+        property_city = property_parts[-3]
+        property_state = property_parts[-2]
+        property_zip = property_parts[-1]
+        
+        mailing_street = ' '.join(mailing_parts[:-3])
+        mailing_city = mailing_parts[-3]
+        mailing_state = mailing_parts[-2]
+        mailing_zip = mailing_parts[-1]
+    elif scenario_2:
+        # Handle Scenario 2: Addresses already in separate columns
+        property_street = row['Property Street']
+        property_city = row['Property City']
+        property_state = row['Property State']
+        property_zip = row['Property Zip']
+        
+        mailing_street = row['Mailing Street']
+        mailing_city = row['Mailing City']
+        mailing_state = row['Mailing State']
+        mailing_zip = row['Mailing Zip']
+    else:
+        logger.error("Invalid address format in row")
+        return None
+
+    payload = {}
+
+    # Property address fields
+    if 'Property Address' in row and pd.notna(row['Property Address']):
+        payload['address'] = row['Property Address']
+        payload['city'] = row['Property City']
+        payload['state'] = row['Property State']  # Note the extra space in column name
+        payload['zip'] = str(row['Property Zip'])  # Convert to string to preserve leading zeros
+
+    # Mailing address fields
+    if 'Mailing Address' in row and pd.notna(row['Mailing Address']):
+        payload['mail_address'] = row['Mailing Address']
+        payload['mail_city'] = row['Mailing City']
+        payload['mail_state'] = row['Mailing State']
+        payload['mail_zip'] = str(row['Mailing Zip'])  # Convert to string to preserve leading zeros
+
+    # Add name fields
+    payload['first_name'] = row['Owner 1 First Name']
+    payload['last_name'] = row['Owner 1 Last Name']
+
+    return payload
 
 # 2.3 Process a single record
 def process_record(record: Dict[str, Any], api_key: str) -> Dict[str, Any]:
@@ -90,22 +127,30 @@ def process_record(record: Dict[str, Any], api_key: str) -> Dict[str, Any]:
         "x-api-key": api_key
     }
 
+    logger.info(f"Sending data to API: {json.dumps(record, indent=2)}")
+
     try:
         response = requests.post(API_URL, headers=headers, json=record, timeout=30)
         if response.status_code == 429:  # Too Many Requests
             logger.warning("Rate limit reached. Waiting before retrying...")
             time.sleep(RETRY_DELAY)
             return None  # Indicate need for retry
-        response.raise_for_status()
+        
         json_response = response.json()
-        # Check if the response was successful
-        if json_response.get("responseMessage") == "Successful":
-            json_response["is_hit"] = True
-        else:
+        
+        if response.status_code == 404:
+            logger.warning("Unable to locate valid property from address(es) provided.")
             json_response["is_hit"] = False
+        elif response.status_code == 200:
+            json_response["is_hit"] = json_response.get("match", False)
+        else:
+            response.raise_for_status()
+        
         return json_response
     except requests.exceptions.RequestException as e:
         logger.error(f"API request failed: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response content: {e.response.text}")
         return None
 
 # 2.4 Save result to file
@@ -123,13 +168,29 @@ def save_result(result: Dict[str, Any], street_address: str) -> None:
 # 2.5 Validate input data
 def validate_input_data(df: pd.DataFrame) -> bool:
     """Validate that the input data is in the correct format."""
-    required_columns = [
-        'Owner 1 First Name', 'Owner 1 Last Name', 'Property Address', 'Mailing Address'
+    required_columns = ['Owner 1 First Name', 'Owner 1 Last Name']
+    
+    # Check for either property or mailing address columns
+    address_scenarios = [
+        ['Property Address', 'Property City', 'Property  State', 'Property Zip'],
+        ['Mailing Address', 'Mailing City', 'Mailing State', 'Mailing Zip']
     ]
+    
+    valid_address_format = False
+    for scenario in address_scenarios:
+        if all(column in df.columns for column in scenario):
+            valid_address_format = True
+            break
+    
+    if not valid_address_format:
+        logger.error("Missing required address columns. Need either property or mailing address components.")
+        return False
+    
     for column in required_columns:
         if column not in df.columns:
             logger.error(f"Missing required column: {column}")
             return False
+    
     return True
 
 # 2.6 Print Summary
@@ -189,7 +250,7 @@ def main() -> None:
             logger.error("No file selected. Exiting.")
             return
 
-        # 3.5 Load and validate the spreadsheet
+      # 3.5 Load and validate the spreadsheet
         logger.info(f"Loading data from {selected_file}")
         if selected_file.endswith(('.xlsx', '.xls')):
             df = pd.read_excel(selected_file)
@@ -202,6 +263,26 @@ def main() -> None:
         else:
             logger.error(f"Unsupported file format: {selected_file}")
             return
+
+        # Debugging: Print DataFrame info
+        print("\nDataFrame Info:")
+        print(df.info())
+
+        # Debugging: Display the first 5 rows
+        print("\nFirst 5 rows of the DataFrame:")
+        print(df.head().to_string())
+
+        # Debugging: Check for null values
+        print("\nNull value counts:")
+        print(df.isnull().sum())
+
+        # Debugging: Verify exact column names
+        print("\nColumn names:")
+        print(df.columns.tolist())
+
+        # Debugging: Display data types of columns
+        print("\nColumn data types:")
+        print(df.dtypes)
 
         if not validate_input_data(df):
             logger.error("Input data validation failed. Stopping script.")
