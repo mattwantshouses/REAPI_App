@@ -1,6 +1,6 @@
 # Script Name: Single Record SkipTrace Processing for Colab with Enhanced Features
-# Version: 3.8 (Flexibility with addresses. Will take one cell or multiple cells.)
-# (next iteration - fix logging to show totals summary at bottom)
+# Version: 3.9 (improved address parsing to handle multiple scenarios correctly)
+
 
 # 1. Imports and Configuration
 # 1.1 Import required libraries
@@ -62,59 +62,54 @@ def select_file() -> Optional[str]:
 # 2.2 Prepare skip trace input
 def prepare_skip_trace_input(row: pd.Series) -> Dict[str, Any]:
     """Prepare a single row for the SkipTrace API input."""
-    # Determine which scenario we're dealing with
-    scenario_1 = 'Property Address' in row.index and 'Mailing Address' in row.index
-    scenario_2 = all(col in row.index for col in ['Property Street', 'Property City', 'Property State', 'Property Zip',
-                                                  'Mailing Street', 'Mailing City', 'Mailing State', 'Mailing Zip'])
+    # 2.2.1 Initialize the payload dictionary
+    payload = {
+        'first_name': row['Owner 1 First Name'],
+        'last_name': row['Owner 1 Last Name']
+    }
 
-    if scenario_1:
-        # Handle Scenario 1: Full addresses in single columns
-        property_parts = row['Property Address'].split()
-        mailing_parts = row['Mailing Address'].split()
-        
-        property_street = ' '.join(property_parts[:-3])
-        property_city = property_parts[-3]
-        property_state = property_parts[-2]
-        property_zip = property_parts[-1]
-        
-        mailing_street = ' '.join(mailing_parts[:-3])
-        mailing_city = mailing_parts[-3]
-        mailing_state = mailing_parts[-2]
-        mailing_zip = mailing_parts[-1]
-    elif scenario_2:
-        # Handle Scenario 2: Addresses already in separate columns
-        property_street = row['Property Street']
-        property_city = row['Property City']
-        property_state = row['Property State']
-        property_zip = row['Property Zip']
-        
-        mailing_street = row['Mailing Street']
-        mailing_city = row['Mailing City']
-        mailing_state = row['Mailing State']
-        mailing_zip = row['Mailing Zip']
-    else:
-        logger.error("Invalid address format in row")
-        return None
-
-    payload = {}
-
-    # Property address fields
+    # 2.2.2 Parse Property Address
     if 'Property Address' in row and pd.notna(row['Property Address']):
-        payload['address'] = row['Property Address']
-        payload['city'] = row['Property City']
-        payload['state'] = row['Property State']  # Note the extra space in column name
-        payload['zip'] = str(row['Property Zip'])  # Convert to string to preserve leading zeros
+        address_parts = row['Property Address'].split(',')
+        # 2.2.2.1 Handle single-cell address format
+        if len(address_parts) >= 3:
+            payload['address'] = address_parts[0].strip()
+            payload['city'] = address_parts[1].strip()
+            state_zip = address_parts[2].strip().split()
+            if len(state_zip) >= 2:
+                payload['state'] = state_zip[0]
+                payload['zip'] = state_zip[1]
+        # 2.2.2.2 Fallback for unexpected formats
+        else:
+            payload['address'] = row['Property Address']
 
-    # Mailing address fields
+    # 2.2.3 Parse Mailing Address
     if 'Mailing Address' in row and pd.notna(row['Mailing Address']):
-        payload['mail_address'] = row['Mailing Address']
+        mail_parts = row['Mailing Address'].split(',')
+        # 2.2.3.1 Handle single-cell address format
+        if len(mail_parts) >= 3:
+            payload['mail_address'] = mail_parts[0].strip()
+            payload['mail_city'] = mail_parts[1].strip()
+            mail_state_zip = mail_parts[2].strip().split()
+            if len(mail_state_zip) >= 2:
+                payload['mail_state'] = mail_state_zip[0]
+                payload['mail_zip'] = mail_state_zip[1]
+        # 2.2.3.2 Fallback for unexpected formats
+        else:
+            payload['mail_address'] = row['Mailing Address']
+
+    # 2.2.4 Handle separate address columns if present
+    if all(col in row.index for col in ['Property Street', 'Property City', 'Property State', 'Property Zip']):
+        payload['address'] = row['Property Street']
+        payload['city'] = row['Property City']
+        payload['state'] = row['Property State']
+        payload['zip'] = str(row['Property Zip'])
+
+    if all(col in row.index for col in ['Mailing Street', 'Mailing City', 'Mailing State', 'Mailing Zip']):
+        payload['mail_address'] = row['Mailing Street']
         payload['mail_city'] = row['Mailing City']
         payload['mail_state'] = row['Mailing State']
-        payload['mail_zip'] = str(row['Mailing Zip'])  # Convert to string to preserve leading zeros
-
-    # Add name fields
-    payload['first_name'] = row['Owner 1 First Name']
-    payload['last_name'] = row['Owner 1 Last Name']
+        payload['mail_zip'] = str(row['Mailing Zip'])
 
     return payload
 
@@ -168,29 +163,34 @@ def save_result(result: Dict[str, Any], street_address: str) -> None:
 # 2.5 Validate input data
 def validate_input_data(df: pd.DataFrame) -> bool:
     """Validate that the input data is in the correct format."""
+    # 2.5.1 Check for required name columns
     required_columns = ['Owner 1 First Name', 'Owner 1 Last Name']
-    
-    # Check for either property or mailing address columns
-    address_scenarios = [
-        ['Property Address', 'Property City', 'Property  State', 'Property Zip'],
-        ['Mailing Address', 'Mailing City', 'Mailing State', 'Mailing Zip']
-    ]
-    
-    valid_address_format = False
-    for scenario in address_scenarios:
-        if all(column in df.columns for column in scenario):
-            valid_address_format = True
-            break
-    
-    if not valid_address_format:
-        logger.error("Missing required address columns. Need either property or mailing address components.")
-        return False
-    
     for column in required_columns:
         if column not in df.columns:
             logger.error(f"Missing required column: {column}")
             return False
     
+    # 2.5.2 Check for address columns
+    address_columns = ['Property Address', 'Mailing Address']
+    separate_address_columns = [
+        ['Property Street', 'Property City', 'Property State', 'Property Zip'],
+        ['Mailing Street', 'Mailing City', 'Mailing State', 'Mailing Zip']
+    ]
+
+    # 2.5.3 Check if at least one address format is present
+    has_combined_address = any(col in df.columns for col in address_columns)
+    has_separate_address = any(all(col in df.columns for col in column_set) for column_set in separate_address_columns)
+
+    if not (has_combined_address or has_separate_address):
+        logger.error("Missing required address columns. Need either combined or separate address components.")
+        return False
+
+    # 2.5.4 Log the detected address format
+    if has_combined_address:
+        logger.info("Detected combined address format.")
+    if has_separate_address:
+        logger.info("Detected separate address component format.")
+
     return True
 
 # 2.6 Print Summary
@@ -229,6 +229,42 @@ def flatten_dict(d, parent_key='', sep='.'):
             items.append((new_key, v))
     return dict(items)
 
+# 2.9 Parse address string
+def parse_address(address_string: str) -> Dict[str, str]:
+    """
+    Parse an address string into components.
+    
+    2.9.1 Input: Full address string
+    2.9.2 Output: Dictionary with address components
+    """
+    components = {'street': '', 'city': '', 'state': '', 'zip': ''}
+    
+    # 2.9.3 Split the address by comma
+    parts = [part.strip() for part in address_string.split(',')]
+    
+    # 2.9.4 Handle different address formats
+    if len(parts) >= 3:
+        # 2.9.4.1 Format: Street, City, State ZIP
+        components['street'] = parts[0]
+        components['city'] = parts[1]
+        state_zip = parts[2].split()
+        if len(state_zip) >= 2:
+            components['state'] = state_zip[0]
+            components['zip'] = state_zip[1]
+    elif len(parts) == 2:
+        # 2.9.4.2 Format: Street, City State ZIP
+        components['street'] = parts[0]
+        city_state_zip = parts[1].split()
+        if len(city_state_zip) >= 3:
+            components['city'] = ' '.join(city_state_zip[:-2])
+            components['state'] = city_state_zip[-2]
+            components['zip'] = city_state_zip[-1]
+    else:
+        # 2.9.4.3 Unable to parse, return the full string as street address
+        components['street'] = address_string
+    
+    return components
+
 # 3. Main Execution
 def main() -> None:
     try:
@@ -250,7 +286,7 @@ def main() -> None:
             logger.error("No file selected. Exiting.")
             return
 
-      # 3.5 Load and validate the spreadsheet
+           # 3.5 Load and validate the spreadsheet
         logger.info(f"Loading data from {selected_file}")
         if selected_file.endswith(('.xlsx', '.xls')):
             df = pd.read_excel(selected_file)
@@ -264,25 +300,25 @@ def main() -> None:
             logger.error(f"Unsupported file format: {selected_file}")
             return
 
-        # Debugging: Print DataFrame info
-        print("\nDataFrame Info:")
-        print(df.info())
+        # 3.5.1 Debugging: Print DataFrame info
+        logger.info("\nDataFrame Info:")
+        logger.info(df.info())
 
-        # Debugging: Display the first 5 rows
-        print("\nFirst 5 rows of the DataFrame:")
-        print(df.head().to_string())
+        # 3.5.2 Debugging: Display the first 5 rows
+        logger.info("\nFirst 5 rows of the DataFrame:")
+        logger.info(df.head().to_string())
 
-        # Debugging: Check for null values
-        print("\nNull value counts:")
-        print(df.isnull().sum())
+        # 3.5.3 Debugging: Check for null values
+        logger.info("\nNull value counts:")
+        logger.info(df.isnull().sum())
 
-        # Debugging: Verify exact column names
-        print("\nColumn names:")
-        print(df.columns.tolist())
+        # 3.5.4 Debugging: Verify exact column names
+        logger.info("\nColumn names:")
+        logger.info(df.columns.tolist())
 
-        # Debugging: Display data types of columns
-        print("\nColumn data types:")
-        print(df.dtypes)
+        # 3.5.5 Debugging: Display data types of columns
+        logger.info("\nColumn data types:")
+        logger.info(df.dtypes)
 
         if not validate_input_data(df):
             logger.error("Input data validation failed. Stopping script.")
