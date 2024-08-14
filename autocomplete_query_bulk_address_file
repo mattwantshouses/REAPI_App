@@ -1,128 +1,227 @@
 # Script Name: Address Autocomplete Processor
-# Version: 1.3
+# Version: 1.5 (optimized for single address API calls)
 
+# !pip install nest_asyncio  # This should be run as a separate cell in Jupyter
+
+# Import section
 import requests
 import json
 import pandas as pd
 import logging
+import os
 from google.colab import files, userdata
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional  # Added Optional here
 import time
 from tqdm import tqdm
+import pickle
+from pathlib import Path
+import asyncio
+import aiohttp
+import sys
+import nest_asyncio
 
 # 1. Configuration and Setup
 # 1.1 Constants and API configuration
 API_URL = "https://api.realestateapi.com/v2/AutoComplete"
-BATCH_SIZE = 1
 MAX_RETRIES = 3
-DELAY_BETWEEN_CALLS = 0.005  # seconds
+DELAY_BETWEEN_CALLS = 0.01  # seconds
+MAX_CONCURRENT_REQUESTS = 10  # Adjust based on API rate limits
 
 # 1.2 Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# 1.3 Check Colab files
+def list_files(file_types: tuple) -> List[str]:
+    return [f for f in os.listdir() if f.endswith(file_types)]
+
+# 1.3.2 List available files and handle file selection
+def select_file() -> str:
+    file_types = ('.txt', '.json')
+    available_files = list_files(file_types)
+    
+    if not available_files:
+        print("No .txt or .json files found in the current directory.")
+        print("1. Upload a new file")
+    else:
+        print("Available files:")
+        for i, file in enumerate(available_files, 1):
+            print(f"{i}. {file}")
+        print(f"{len(available_files) + 1}. Upload a new file")
+    
+    while True:
+        try:
+            choice = int(input("Enter the number of your choice: "))
+            if 1 <= choice <= len(available_files):
+                selected_file = available_files[choice - 1]
+                print(f"Selected file: {selected_file}")
+                return selected_file
+            elif choice == len(available_files) + 1 or (not available_files and choice == 1):
+                # Upload a new file
+                print("Please upload a file.")
+                uploaded = files.upload()
+                if uploaded:
+                    return list(uploaded.keys())[0]
+                print("No file was uploaded. Please try again.")
+            else:
+                print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+        except EOFError:
+            print("Error reading input. Please try again.")
+        except Exception as e:
+            print(f"An error occurred: {str(e)}. Please try again.")
+
+# 1.4 Caching setup
+CACHE_FILE = 'address_cache.pkl'
+
+def load_cache():
+    if Path(CACHE_FILE).exists():
+        with open(CACHE_FILE, 'rb') as f:
+            return pickle.load(f)
+    return {}
+
+def save_cache(cache):
+    with open(CACHE_FILE, 'wb') as f:
+        pickle.dump(cache, f)
+
+address_cache = load_cache()
+
 # 2. Helper Functions
-# 2.1 API key retrieval
+# 2.1 API key retrieval and caching
+api_key_cache: Optional[str] = None
+
 def get_api_key() -> str:
-    api_key = userdata.get('x-api-key')
-    if not api_key:
-        logger.warning("API key not found in Colab secrets. Prompting user for manual input.")
-        api_key = input("Please enter your API key: ")
-    if not api_key:
-        raise ValueError("API key is required to proceed.")
-    return api_key
+    global api_key_cache
+    if api_key_cache is None:
+        api_key_cache = userdata.get('x-api-key')
+        if not api_key_cache:
+            logger.warning("API key not found in Colab secrets. Prompting user for manual input.")
+            api_key_cache = input("Please enter your API key: ")
+        if not api_key_cache:
+            raise ValueError("API key is required to proceed.")
+    return api_key_cache
 
 # 2.2 API request function
-def make_api_request(address: str) -> Dict[str, Any]:
+async def make_api_request(session: aiohttp.ClientSession, address: str) -> Dict[str, Any]:
     headers = {
         "x-user-id": "UniqueUserIdentifier",
         "content-type": "application/json",
         "x-api-key": get_api_key()
     }
     payload = {
-        "ids_only": False,
-        "obfuscate": False,
-        "summary": False,
-        "size": 50,
         "search_types": ["A"],
         "search": address
     }
     for attempt in range(MAX_RETRIES):
         try:
-            response = requests.post(API_URL, json=payload, headers=headers)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429:
-                logger.warning(f"Rate limit exceeded (attempt {attempt + 1}/{MAX_RETRIES}): {str(e)}")
-            else:
-                logger.warning(f"Request failed (attempt {attempt + 1}/{MAX_RETRIES}): {str(e)}")
-            time.sleep(DELAY_BETWEEN_CALLS * (attempt + 1))
+            async with session.post(API_URL, json=payload, headers=headers) as response:
+                response.raise_for_status()
+                return await response.json()
+        except aiohttp.ClientResponseError as e:
+            logger.warning(f"HTTP error (attempt {attempt + 1}/{MAX_RETRIES}): {e.status} - {e.message}")
+        except aiohttp.ClientError as e:
+            logger.warning(f"Client error (attempt {attempt + 1}/{MAX_RETRIES}): {str(e)}")
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout error (attempt {attempt + 1}/{MAX_RETRIES})")
+        except Exception as e:
+            logger.warning(f"Unexpected error (attempt {attempt + 1}/{MAX_RETRIES}): {str(e)}")
+        await asyncio.sleep(DELAY_BETWEEN_CALLS * (attempt + 1))
     logger.error(f"Max retries reached for address: {address}")
     return {}
 
-# 2.3 Process addresses in batches
-def process_addresses(addresses: List[str]) -> List[Dict[str, Any]]:
+# 2.3 Process addresses
+async def process_addresses(addresses: List[str]) -> List[Dict[str, Any]]:
     results = []
-    total_addresses = len(addresses)
-    for i in tqdm(range(total_addresses), desc="Processing addresses", unit="address"):
-        address_line = addresses[i].strip().rstrip(',')  # Remove whitespace and trailing comma
-        try:
-            # Extract address using string manipulation instead of full JSON parsing
-            address = address_line.split('"address": ')[1].strip('"').rstrip('}').strip()            
-            result = make_api_request(address)
-            results.append(result)
-        except IndexError:
-            logger.warning(f"Invalid format on line {i+1}: {address_line}")
-            continue  # Skip this line and continue with the next
-        time.sleep(DELAY_BETWEEN_CALLS)
+    async with aiohttp.ClientSession() as session:
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        tasks = []
+        for address in addresses:
+            if address in address_cache:
+                results.append(address_cache[address])
+            else:
+                task = asyncio.ensure_future(process_single_address(session, semaphore, address))
+                tasks.append(task)
+        
+        for future in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Processing addresses"):
+            try:
+                result = await future
+                results.append(result)
+            except Exception as e:
+                logger.error(f"Error processing address: {str(e)}")
+    
+    save_cache(address_cache)
     return results
+
+async def process_single_address(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, address: str) -> Dict[str, Any]:
+    async with semaphore:
+        try:
+            result = await make_api_request(session, address)
+            data = result.get('data', [])
+            if data:
+                data = data[0]
+            else:
+                logger.warning(f"No data returned for address: {address}")
+                data = {}
+            address_cache[address] = data
+            await asyncio.sleep(DELAY_BETWEEN_CALLS)
+            return data
+        except Exception as e:
+            logger.error(f"Error processing address '{address}': {str(e)}")
+            return {"error": str(e), "address": address}
 
 # 2.4 Convert JSON results to DataFrame
 def json_to_dataframe(results: List[Dict[str, Any]]) -> pd.DataFrame:
     flattened_data = []
-    for result in results:
-        if not result.get('data'):
-            logger.warning(f"No data found for input: {result.get('input', {}).get('search', '')}")
-            continue
-        for item in result.get('data', []):
-            flattened_item = {
-                'input_address': result.get('input', {}).get('search', ''),
-                'id': item.get('id', ''),
-                'title': item.get('title', ''),
-                'address': item.get('address', ''),
-                'city': item.get('city', ''),
-                'state': item.get('state', ''),
-                'zip': item.get('zip', ''),
-                'county': item.get('county', ''),
-                'latitude': item.get('latitude', ''),
-                'longitude': item.get('longitude', ''),
-                'type': item.get('type', '')
-            }
-            flattened_data.append(flattened_item)
+    for item in results:
+        flattened_item = {
+            'input_address': item.get('input', {}).get('search', ''),
+            'id': item.get('id', ''),
+            'title': item.get('title', ''),
+            'address': item.get('address', ''),
+            'city': item.get('city', ''),
+            'state': item.get('state', ''),
+            'zip': item.get('zip', ''),
+            'county': item.get('county', ''),
+            'latitude': item.get('latitude', ''),
+            'longitude': item.get('longitude', ''),
+            'type': item.get('type', '')
+        }
+        flattened_data.append(flattened_item)
     return pd.DataFrame(flattened_data)
 
+# 2.5 Address parsing function
+def parse_addresses(file_name: str) -> List[str]:
+    addresses = []
+    with open(file_name, 'r') as f:
+        for line in f:
+            try:
+                # Remove leading/trailing whitespace and the trailing comma if present
+                line = line.strip().rstrip(',')
+                # Extract the address from the JSON-like format
+                address = json.loads(line)['address']
+                addresses.append(address)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in line: {line}")
+            except KeyError:
+                logger.warning(f"Missing 'address' key in line: {line}")
+            except Exception as e:
+                logger.warning(f"Unexpected error parsing line: {line}. Error: {str(e)}")
+    return addresses
+
 # 3. Main Execution
-def main():
+async def main_async():
     try:
-        # 3.1 File upload
-        logger.info("Please upload your addresses.txt file")
-        uploaded = files.upload()
-
-        if not uploaded:
-            logger.error("No file was uploaded. Exiting.")
-            return
-
-        file_name = next(iter(uploaded))
+        # 3.1 File selection or upload
+        file_name = select_file()
         
         # 3.2 Read addresses
-        with open(file_name, 'r') as f:
-            addresses = f.readlines()
+        addresses = parse_addresses(file_name)
 
         logger.info(f"Loaded {len(addresses)} addresses from {file_name}")
 
         # 3.3 Process addresses
-        results = process_addresses(addresses)
+        results = await process_addresses(addresses)
 
         # 3.4 Convert to DataFrame
         df = json_to_dataframe(results)
@@ -144,5 +243,15 @@ def main():
     except Exception as e:
         logger.exception(f"An unexpected error occurred: {str(e)}")
 
-if __name__ == "__main__":
-    main()
+# This function will be called to run our async code
+def run_main():
+    nest_asyncio.apply()
+    asyncio.get_event_loop().run_until_complete(main_async())
+
+# If running in Jupyter, we'll use this cell to execute our code
+if 'ipykernel' in sys.modules:
+    run_main()
+else:
+    # For non-Jupyter environments
+    if __name__ == "__main__":
+        asyncio.run(main_async())
