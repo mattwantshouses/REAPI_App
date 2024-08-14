@@ -1,17 +1,19 @@
 # Script Name: Address Autocomplete Processor
-# Version: 1.5 (optimized for single address API calls)
+# Version: 2.0 (add csv input)
 
-!pip install nest_asyncio  # This should be run as a separate cell in Jupyter
+# !pip install nest_asyncio  # This should be run as a separate cell in Jupyter
 
 # Import section
 import requests
+import csv
 import json
 import pandas as pd
 import logging
 import os
 from google.colab import files, userdata
-from typing import List, Dict, Any, Optional  # Added Optional here
-import time
+from typing import List, Dict, Any, Optional, Tuple  # Added Optional AND Tuple here
+import pytz
+from datetime import datetime, timezone
 from tqdm import tqdm
 import pickle
 from pathlib import Path
@@ -33,15 +35,15 @@ logger = logging.getLogger(__name__)
 
 # 1.3 Check Colab files
 def list_files(file_types: tuple) -> List[str]:
-    return [f for f in os.listdir() if f.endswith(file_types)]
+    return [f for f in os.listdir() if f.lower().endswith(file_types)]
 
 # 1.3.2 List available files and handle file selection
 def select_file() -> str:
-    file_types = ('.txt', '.json')
+    file_types = ('.txt', '.json', '.csv')
     available_files = list_files(file_types)
     
     if not available_files:
-        print("No .txt or .json files found in the current directory.")
+        print("No .txt, .json, or .csv files found in the current directory.")
         print("1. Upload a new file")
     else:
         print("Available files:")
@@ -131,16 +133,18 @@ async def make_api_request(session: aiohttp.ClientSession, address: str) -> Dict
     return {}
 
 # 2.3 Process addresses
-async def process_addresses(addresses: List[str]) -> List[Dict[str, Any]]:
+async def process_addresses(addresses: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
     results = []
     async with aiohttp.ClientSession() as session:
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         tasks = []
-        for address in addresses:
+        for original, address in addresses:
             if address in address_cache:
-                results.append(address_cache[address])
+                result = address_cache[address]
+                result['input_address'] = original
+                results.append(result)
             else:
-                task = asyncio.ensure_future(process_single_address(session, semaphore, address))
+                task = asyncio.ensure_future(process_single_address(session, semaphore, original, address))
                 tasks.append(task)
         
         for future in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Processing addresses"):
@@ -153,7 +157,8 @@ async def process_addresses(addresses: List[str]) -> List[Dict[str, Any]]:
     save_cache(address_cache)
     return results
 
-async def process_single_address(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, address: str) -> Dict[str, Any]:
+# 2.3.1 Process single address
+async def process_single_address(session: aiohttp.ClientSession, semaphore: asyncio.Semaphore, original: str, address: str) -> Dict[str, Any]:
     async with semaphore:
         try:
             result = await make_api_request(session, address)
@@ -161,21 +166,26 @@ async def process_single_address(session: aiohttp.ClientSession, semaphore: asyn
             if data:
                 data = data[0]
             else:
-                logger.warning(f"No data returned for address: {address}")
                 data = {}
+            
+            data['input_address'] = original
+            
+            if not data.get('address'):
+                data['error'] = 'No data returned'
+            
             address_cache[address] = data
             await asyncio.sleep(DELAY_BETWEEN_CALLS)
             return data
         except Exception as e:
             logger.error(f"Error processing address '{address}': {str(e)}")
-            return {"error": str(e), "address": address}
+            return {"input_address": original, "error": str(e)}
 
 # 2.4 Convert JSON results to DataFrame
 def json_to_dataframe(results: List[Dict[str, Any]]) -> pd.DataFrame:
     flattened_data = []
     for item in results:
         flattened_item = {
-            'input_address': item.get('input', {}).get('search', ''),
+            'input_address': item.get('input_address', ''),
             'id': item.get('id', ''),
             'title': item.get('title', ''),
             'address': item.get('address', ''),
@@ -185,28 +195,59 @@ def json_to_dataframe(results: List[Dict[str, Any]]) -> pd.DataFrame:
             'county': item.get('county', ''),
             'latitude': item.get('latitude', ''),
             'longitude': item.get('longitude', ''),
-            'type': item.get('type', '')
+            'type': item.get('type', ''),
+            'error': item.get('error', '')
         }
         flattened_data.append(flattened_item)
     return pd.DataFrame(flattened_data)
 
 # 2.5 Address parsing function
-def parse_addresses(file_name: str) -> List[str]:
+def parse_addresses(file_name: str) -> List[Tuple[str, str]]:
     addresses = []
-    with open(file_name, 'r') as f:
-        for line in f:
-            try:
-                # Remove leading/trailing whitespace and the trailing comma if present
-                line = line.strip().rstrip(',')
-                # Extract the address from the JSON-like format
-                address = json.loads(line)['address']
-                addresses.append(address)
-            except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON in line: {line}")
-            except KeyError:
-                logger.warning(f"Missing 'address' key in line: {line}")
-            except Exception as e:
-                logger.warning(f"Unexpected error parsing line: {line}. Error: {str(e)}")
+    file_extension = os.path.splitext(file_name)[1].lower()
+
+    if file_extension == '.json':
+        with open(file_name, 'r') as f:
+            for line in f:
+                try:
+                    line = line.strip().rstrip(',')
+                    parsed = json.loads(line)
+                    original = parsed['address']
+                    addresses.append((original, original))
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid JSON in line: {line}")
+                except KeyError:
+                    logger.warning(f"Missing 'address' key in line: {line}")
+                except Exception as e:
+                    logger.warning(f"Unexpected error parsing line: {line}. Error: {str(e)}")
+    elif file_extension in ['.csv', '.txt']:
+        with open(file_name, 'r', newline='') as f:
+            reader = csv.reader(f)
+            headers = next(reader, None)
+            
+            if headers and len(headers) > 1:
+                print("Multiple columns detected. Please select the column containing addresses:")
+                for i, header in enumerate(headers):
+                    print(f"{i + 1}. {header}")
+                
+                while True:
+                    try:
+                        choice = int(input("Enter the number of your choice: ")) - 1
+                        if 0 <= choice < len(headers):
+                            address_column = choice
+                            break
+                        else:
+                            print("Invalid choice. Please try again.")
+                    except ValueError:
+                        print("Invalid input. Please enter a number.")
+            else:
+                address_column = 0
+            
+            for row in reader:
+                if row:
+                    address = row[address_column].strip()
+                    addresses.append((address, address))
+    
     return addresses
 
 # 3. Main Execution
@@ -232,7 +273,16 @@ async def main_async():
             logger.warning(f"Only {len(df)} out of {len(addresses)} addresses were successfully processed.")
 
         # 3.5 Save to CSV
-        csv_filename = 'autocompleted_addresses.csv'
+        est = pytz.timezone('US/Eastern')
+        current_time = datetime.now(est).strftime("%m%d%y_%H%M")
+        csv_filename = f'autocompleted_addresses_{current_time}.csv'
+        df.to_csv(csv_filename, index=False)
+        logger.info(f"Results saved to {csv_filename}")
+       
+        # Create the filename
+        csv_filename = f'autocompleted_addresses_{current_time}.csv'
+
+        # Save the DataFrame to CSV
         df.to_csv(csv_filename, index=False)
         logger.info(f"Results saved to {csv_filename}")
 
