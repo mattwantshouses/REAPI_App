@@ -1,7 +1,7 @@
 # Script Name: Address Autocomplete Processor
 # Version: 1.5 (optimized for single address API calls)
 
-# !pip install nest_asyncio  # This should be run as a separate cell in Jupyter
+!pip install nest_asyncio  # This should be run as a separate cell in Jupyter
 
 # Import section
 import requests
