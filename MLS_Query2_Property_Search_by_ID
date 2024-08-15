@@ -1,0 +1,332 @@
+# Script Name: MLS Query 2 - CSID Property Search by ID's
+# Version: 2.3
+# Status: Tested - returned 2 matches
+
+!pip install nest_asyncio 
+
+# 1. Import section
+import requests
+import csv
+import json
+import pandas as pd
+import logging
+import os
+from google.colab import files, userdata, drive
+from typing import List, Dict, Any, Optional, Tuple
+import pytz
+from datetime import datetime
+import asyncio
+import aiohttp
+import sys
+import nest_asyncio
+
+# 1.2 Check Colab files
+def list_files(file_types: tuple) -> List[str]:
+    return [f for f in os.listdir() if f.lower().endswith(file_types)]
+
+# 1.3 List available files and handle file selection
+def select_file() -> str:
+    file_types = ('.txt', '.json', '.csv')
+    available_files = list_files(file_types)
+
+    if not available_files:
+        print("No .txt, .json, or .csv files found in the current directory.")
+        print("1. Upload a new file")
+    else:
+        print("Available files:")
+        for i, file in enumerate(available_files, 1):
+            print(f"{i}. {file}")
+        print(f"{len(available_files) + 1}. Upload a new file")
+
+    while True:
+        try:
+            choice = int(input("Enter the number of your choice: "))
+            if 1 <= choice <= len(available_files):
+                selected_file = available_files[choice - 1]
+                print(f"Selected file: {selected_file}")
+                return selected_file
+            elif choice == len(available_files) + 1 or (not available_files and choice == 1):
+                # Upload a new file
+                print("Please upload a file.")
+                uploaded = files.upload()
+                if uploaded:
+                    return list(uploaded.keys())[0]
+                print("No file was uploaded. Please try again.")
+            else:
+                print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+        except EOFError:
+            print("Error reading input. Please try again.")
+        except Exception as e:
+            print(f"An error occurred: {str(e)}. Please try again.")
+
+
+# 2. Configuration and Setup
+# 2.1 Constants and API configuration
+API_URL = "https://api.realestateapi.com/v2/PropertySearch"
+MAX_RETRIES = 3
+DELAY_BETWEEN_CALLS = 0.01  # seconds
+MAX_CONCURRENT_REQUESTS = 10  # Adjust based on API rate limits
+
+# 2.2 Logging setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# 3. Helper Functions
+# 3.1 API key retrieval and configuration
+def get_api_key() -> str:
+    api_key = userdata.get('x-api-key')
+    if not api_key:
+        logger.warning("API key not found in Colab secrets. Prompting user for manual input.")
+        api_key = input("Please enter your API key: ")
+    if not api_key:
+        raise ValueError("API key is required to proceed.")
+    return api_key
+
+# 3.2 API request function
+async def make_api_request(session: aiohttp.ClientSession, payload: Dict[str, Any]) -> Dict[str, Any]:
+    headers = {
+        "x-user-id": "UniqueUserIdentifier",
+        "content-type": "application/json",
+        "x-api-key": get_api_key()
+    }
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            async with session.post(API_URL, json=payload, headers=headers) as response:
+                response.raise_for_status()
+                json_response = await response.json()
+                if 'error' in json_response or 'errors' in json_response:
+                    handle_api_error(json_response)
+                return json_response
+        except aiohttp.ClientResponseError as e:
+            logger.error(f"HTTP error (attempt {attempt + 1}/{MAX_RETRIES}): {e.status} - {e.message}")
+        except aiohttp.ClientError as e:
+            logger.error(f"Client error (attempt {attempt + 1}/{MAX_RETRIES}): {str(e)}")
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout error (attempt {attempt + 1}/{MAX_RETRIES})")
+        except Exception as e:
+            logger.error(f"Unexpected error (attempt {attempt + 1}/{MAX_RETRIES}): {str(e)}")
+        await asyncio.sleep(DELAY_BETWEEN_CALLS * (attempt + 1))
+    
+    raise Exception(f"Max retries reached for payload: {payload}")
+
+# 3.3 API error handling
+def handle_api_error(response: Dict[str, Any]):
+    if 'error' in response:
+        error_message = f"API Error: {json.dumps(response['error'], indent=2)}"
+    elif 'errors' in response:
+        error_message = f"API Errors: {json.dumps(response['errors'], indent=2)}"
+    else:
+        error_message = "Unknown API Error"
+    
+    logger.error(error_message)
+    raise Exception(error_message)
+
+# 3.4 ID parsing function
+def parse_input_data(file_name: str) -> Tuple[List[int], List[str]]:
+    ids = []
+    warnings = []
+    file_extension = os.path.splitext(file_name)[1].lower()
+
+    def parse_id(value, row_num=None):
+        if not value or str(value).strip() == '':
+            warnings.append(f"Row {row_num}: Empty ID value")
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            cleaned_value = ''.join(filter(str.isdigit, str(value)))
+            if cleaned_value:
+                warnings.append(f"Row {row_num}: Cleaned ID '{value}' to '{cleaned_value}'")
+                return int(cleaned_value)
+            else:
+                warnings.append(f"Row {row_num}: Unable to parse ID '{value}'")
+                return None
+
+    if file_extension == '.json':
+        with open(file_name, 'r') as f:
+            for line_number, line in enumerate(f, 1):
+                try:
+                    line = line.strip().rstrip(',')
+                    parsed = json.loads(line)
+                    id_value = parse_id(parsed.get('id'), line_number)
+                    if id_value is not None:
+                        ids.append(id_value)
+                except json.JSONDecodeError:
+                    warnings.append(f"Invalid JSON on line {line_number}: {line}")
+                except Exception as e:
+                    warnings.append(f"Unexpected error parsing line {line_number}: {line}. Error: {str(e)}")
+    elif file_extension in ['.csv', '.txt']:
+        with open(file_name, 'r', newline='') as f:
+            reader = csv.reader(f)
+            headers = next(reader, None)
+            
+            if headers and len(headers) > 1:
+                print("Multiple columns detected. Please select the column containing IDs:")
+                for i, header in enumerate(headers):
+                    print(f"{i + 1}. {header}")
+                
+                while True:
+                    try:
+                        choice = int(input("Enter the number of your choice: ")) - 1
+                        if 0 <= choice < len(headers):
+                            id_column = choice
+                            break
+                        else:
+                            print("Invalid choice. Please try again.")
+                    except ValueError:
+                        print("Invalid input. Please enter a number.")
+            else:
+                id_column = 0
+            
+            for row_number, row in enumerate(reader, 2):  # Start from 2 to account for header row
+                if row:
+                    id_value = parse_id(row[id_column].strip(), row_number)
+                    if id_value is not None:
+                        ids.append(id_value)
+
+    logger.info(f"Successfully parsed {len(ids)} IDs from {file_name}")
+    logger.info(f"Encountered {len(warnings)} warnings while parsing")
+    
+    return ids, warnings
+
+# 3.5 Summary formatting
+def format_summary(summary: Dict[str, Any]) -> str:
+    return json.dumps(summary, indent=2)
+
+
+# 4. Base Payload Section
+def create_base_payload() -> Dict[str, Any]:
+    return {
+        "mls_active": False,
+        "mls_pending": False,
+        "corporate_owned": False,
+        "reo": False,
+        "out_of_state_owner": True,
+        "ids_only": True
+    }
+
+# 5. Asynchronous Processing
+async def process_chunk(session: aiohttp.ClientSession, chunk: List[int], base_payload: Dict[str, Any]) -> List[int]:
+    payload = {
+        **base_payload,
+        "ids": chunk,
+    }
+    result = await make_api_request(session, payload)
+    return result.get('data', [])
+
+# 6. Query Execution Functions
+# 6.1 Execute ID filtering query
+async def execute_id_filtering_query(session: aiohttp.ClientSession, input_ids: List[int], base_payload: Dict[str, Any]) -> List[int]:
+    chunks = [input_ids[i:i+1000] for i in range(0, len(input_ids), 1000)]
+    tasks = [process_chunk(session, chunk, base_payload) for chunk in chunks]
+    results = await asyncio.gather(*tasks)
+    return [id for chunk_result in results for id in chunk_result]
+
+# 6.2 Execute count query
+async def execute_count_query(session: aiohttp.ClientSession, ids: List[int]) -> int:
+    payload = {
+        "ids": ids,
+        "count": True,
+    }
+    result = await make_api_request(session, payload)
+    return result.get('count', 0)
+
+# 6.3 Execute summary query
+async def execute_summary_query(session: aiohttp.ClientSession, ids: List[int]) -> Dict[str, Any]:
+    payload = {
+        "ids": ids,
+        "summary": True,
+    }
+    result = await make_api_request(session, payload)
+    return result.get('summary', {})
+
+# 7. Result Handling
+def handle_results(matching_ids: List[int], count_result: int, summary_result: Dict[str, Any]):
+    # 7.1 Save matching IDs to CSV
+    df = pd.DataFrame(matching_ids, columns=['ID'])
+    est = pytz.timezone('US/Eastern')
+    current_time = datetime.now(est).strftime("%m%d%y_%H%M")
+    csv_filename = f'matching_ids_{current_time}.csv'
+    df.to_csv(csv_filename, index=False)
+    logger.info(f"Matching IDs saved to {csv_filename}")
+    
+    # 7.2 Save summary to JSON
+    summary_filename = f'summary_{current_time}.json'
+    with open(summary_filename, 'w') as f:
+        json.dump({
+            "matching_ids_count": count_result,
+            "summary": summary_result
+        }, f, indent=2)
+    logger.info(f"Summary saved to {summary_filename}")
+    
+    # 7.3 Download files
+    files.download(csv_filename)
+    files.download(summary_filename)
+
+# 7.4 Save warnings to file
+def save_warnings_to_file(warnings: List[str], file_name: str):
+    est = pytz.timezone('US/Eastern')
+    current_time = datetime.now(est).strftime("%m%d%y_%H%M")
+    warnings_filename = f'parsing_warnings_{current_time}.txt'
+    
+    with open(warnings_filename, 'w') as f:
+        f.write(f"Parsing warnings for file: {file_name}\n")
+        f.write(f"Total warnings: {len(warnings)}\n\n")
+        for warning in warnings:
+            f.write(f"{warning}\n")
+    
+    logger.info(f"Parsing warnings saved to {warnings_filename}")
+    files.download(warnings_filename)
+
+# 8. Main Execution
+async def main_async():
+    try:
+        # 8.1 File selection and ID parsing
+        file_name = select_file()
+        input_ids, warnings = parse_input_data(file_name)
+        logger.info(f"Loaded {len(input_ids)} IDs from {file_name}")
+        logger.info(f"Encountered {len(warnings)} warnings during parsing")
+
+        # 8.1.1 Save warnings to file
+        save_warnings_to_file(warnings, file_name)
+
+        # 8.2 Create base payload
+        base_payload = create_base_payload()
+
+        # 8.3 Execute queries
+        async with aiohttp.ClientSession() as session:
+            # 8.3.1 Filter IDs
+            matching_ids = await execute_id_filtering_query(session, input_ids, base_payload)
+            logger.info(f"Found {len(matching_ids)} matching IDs")
+
+            # 8.3.2 Get count
+            count_result = await execute_count_query(session, matching_ids)
+            logger.info(f"Count of matching IDs: {count_result}")
+
+            # 8.3.3 Get summary
+            summary_result = await execute_summary_query(session, matching_ids)
+            logger.info("Summary of matching IDs:")
+            logger.info(format_summary(summary_result))
+
+        # 8.4 Handle results
+        handle_results(matching_ids, count_result, summary_result)
+
+    except Exception as e:
+        logger.exception(f"An unexpected error occurred: {str(e)}")
+        raise
+
+# 9. Script Execution
+def run_main():
+    nest_asyncio.apply()
+    asyncio.get_event_loop().run_until_complete(main_async())
+
+# If running in Jupyter, we'll use this cell to execute our code
+if 'ipykernel' in sys.modules:
+    run_main()
+else:
+    # For non-Jupyter environments
+    if __name__ == "__main__":
+        asyncio.run(main_async())

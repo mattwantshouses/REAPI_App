@@ -1,4 +1,4 @@
-# Script Name: Address Autocomplete Processor
+# Script Name: MLS Query 1 - Autocomplete Bulk Addresses
 # Version: 2.0 (add csv input)
 
 # !pip install nest_asyncio  # This should be run as a separate cell in Jupyter
