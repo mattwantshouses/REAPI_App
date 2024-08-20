@@ -1,0 +1,230 @@
+# Script Name: Basic Query 2 - Property Detail Pagination
+# Version: 2.0
+# Status: Testing
+
+import requests
+import json
+import logging
+import pandas as pd
+from typing import Dict, Any, List
+from google.colab import userdata, files
+from datetime import datetime
+import pytz
+import io
+import os
+import time
+from requests.exceptions import RequestException
+from tenacity import retry, stop_after_attempt, wait_exponential
+import csv
+
+# 1. Configuration and Setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+API_URL = "https://api.realestateapi.com/v2/PropertyDetail"
+API_KEY = userdata.get('x-api-key')
+
+if not API_KEY:
+    raise ValueError("API key not found in Colab secrets. Please set the 'x-api-key' secret.")
+
+# 2. Helper Functions
+# 2.1 API Request Function
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+def make_api_request(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Make an API request and return the JSON response."""
+    headers = {
+        "accept": "application/json",
+        "x-user-id": "UniqueUserIdentifier",
+        "content-type": "application/json",
+        "x-api-key": API_KEY
+    }
+    try:
+        response = requests.post(API_URL, json=payload, headers=headers)
+        response.raise_for_status()
+        json_response = response.json()
+        if 'error' in json_response or 'errors' in json_response:
+            logger.warning(f"API returned an error for payload: {payload}")
+            logger.warning(f"Error response: {json_response}")
+            return None
+        return json_response
+    except RequestException as e:
+        logger.error(f"API request failed: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"Response content: {e.response.text}")
+        raise
+
+# 2.2 File Selection Function (modify existing function)
+def select_ids_file() -> str:
+    """Allow user to select the IDs file or upload a new one."""
+    files_list = [f for f in os.listdir() if f.endswith(('.json', '.csv', '.txt'))]
+
+    if not files_list:
+        print("No existing IDs files found. Please upload a file.")
+        uploaded = files.upload()
+        return list(uploaded.keys())[0]
+
+    print("Available IDs files:")
+    for i, file in enumerate(files_list, 1):
+        print(f"{i}. {file}")
+
+    while True:
+        choice = input("Enter the number of the file to use, or 'u' to upload a new file: ")
+        if choice.lower() == 'u':
+            uploaded = files.upload()
+            return list(uploaded.keys())[0]
+        try:
+            index = int(choice) - 1
+            if 0 <= index < len(files_list):
+                return files_list[index]
+        except ValueError:
+            pass
+        print("Invalid choice. Please try again.")
+
+# 2.3 Load IDs Function (modify existing function)
+def load_ids(filename: str) -> List[int]:
+    """Load property IDs from the selected file and convert to integers."""
+    _, ext = os.path.splitext(filename)
+    ids = []
+    warnings = []
+
+    def parse_id(value, row_num=None):
+        try:
+            return int(value)
+        except ValueError:
+            cleaned_value = ''.join(filter(str.isdigit, str(value)))
+            if cleaned_value:
+                warnings.append(f"Row {row_num}: Cleaned ID '{value}' to '{cleaned_value}'")
+                return int(cleaned_value)
+            else:
+                warnings.append(f"Row {row_num}: Unable to parse ID '{value}'")
+                return None
+
+    if ext == '.json':
+        with open(filename, 'r') as f:
+            data = json.load(f)
+            raw_ids = data if isinstance(data, list) else list(data.values())[0]
+            ids = [parse_id(id, i) for i, id in enumerate(raw_ids, 1) if parse_id(id, i) is not None]
+    elif ext in ['.csv', '.txt']:
+        with open(filename, 'r', newline='') as f:
+            reader = csv.reader(f)
+            headers = next(reader, None)
+            
+            if headers and len(headers) > 1:
+                print("Multiple columns detected. Please select the column containing IDs:")
+                for i, header in enumerate(headers):
+                    print(f"{i + 1}. {header}")
+                
+                while True:
+                    try:
+                        choice = int(input("Enter the number of your choice: ")) - 1
+                        if 0 <= choice < len(headers):
+                            id_column = choice
+                            break
+                        else:
+                            print("Invalid choice. Please try again.")
+                    except ValueError:
+                        print("Invalid input. Please enter a number.")
+            else:
+                id_column = 0
+            
+            for row_number, row in enumerate(reader, 2):  # Start from 2 to account for header row
+                if row:
+                    id_value = parse_id(row[id_column].strip(), row_number)
+                    if id_value is not None:
+                        ids.append(id_value)
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
+
+    if warnings:
+        print(f"Encountered {len(warnings)} warnings while parsing:")
+        for warning in warnings[:10]:  # Print first 10 warnings
+            print(warning)
+        if len(warnings) > 10:
+            print(f"... and {len(warnings) - 10} more warnings.")
+
+    return ids
+
+# 2.3.1 Preview Loaded IDs
+def preview_loaded_ids(ids: List[int], num_preview: int = 5):
+    """Preview the first few loaded IDs."""
+    print(f"\nPreview of first {num_preview} loaded IDs:")
+    for i, id in enumerate(ids[:num_preview], 1):
+        print(f"{i}. {id}")
+    print(f"...\nTotal IDs loaded: {len(ids)}")
+
+# 2.4 Pagination Function
+def paginated_property_detail_retrieval(ids: List[int], batch_size: int = 50) -> List[Dict[str, Any]]:
+    """Retrieve property details with pagination."""
+    all_results = []
+    total_ids = len(ids)
+
+    for i in range(0, total_ids, batch_size):
+        batch = ids[i:i+batch_size]
+        logger.info(f"Processing batch {i//batch_size + 1} of {(total_ids + batch_size - 1)//batch_size}")
+
+        for property_id in batch:
+            payload = {"id": property_id}
+            try:
+                response = make_api_request(payload)
+                if response is not None:
+                    all_results.append(response)
+            except Exception as e:
+                logger.error(f"Failed to retrieve details for property ID {property_id}: {str(e)}")
+
+            # # Add a small delay to avoid overwhelming the API
+            # time.sleep(0.5)
+
+    return all_results
+
+# 3. Main Execution
+def main():
+    # 3.1 Select and load property IDs
+    ids_file = select_ids_file()
+    property_ids = load_ids(ids_file)
+    preview_loaded_ids(property_ids)  # New line to preview loaded IDs
+    logger.info(f"Loaded {len(property_ids)} property IDs from {ids_file}")
+
+    # 3.2 Retrieve property details with pagination
+    property_details = paginated_property_detail_retrieval(property_ids)
+
+    # 3.3 Create preview of first 5 responses
+    preview_data = property_details[:5]
+
+    # 3.4 Function to flatten nested JSON for preview
+    def flatten_for_preview(d):
+        flat = {}
+        for key, value in d.items():
+            if isinstance(value, dict):
+                for subkey, subvalue in value.items():
+                    flat[f"{key}_{subkey}"] = subvalue
+            else:
+                flat[key] = value
+        return flat
+
+    # 3.5 Flatten preview data
+    flattened_preview = [flatten_for_preview(item) for item in preview_data]
+
+    # 3.6 Create DataFrame from flattened preview data
+    preview_df = pd.DataFrame(flattened_preview)
+
+    # 3.7 Print preview
+    print("\nPreview of first 5 responses:")
+    print(preview_df.to_string())
+
+    # 3.8 Generate timestamp and filename components
+    est_tz = pytz.timezone('US/Eastern')
+    current_datetime = datetime.now(est_tz)
+    date_str = current_datetime.strftime("%m%d%y")
+    time_str = current_datetime.strftime("%H%M")
+
+    # Create a summary based on the number of property IDs processed
+    query_summary = f"{len(property_ids)}_properties"
+
+    # 3.9 Save JSON response
+    json_filename = f"PD_{date_str}{time_str}_{query_summary}.json"
+    with open(json_filename, 'w') as f:
+        json.dump(property_details, f)
+    print(f"JSON response saved in Colab: {json_filename}")
+
+if __name__ == "__main__":
+    main()
