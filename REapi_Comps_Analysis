@@ -47,16 +47,21 @@ def select_file() -> str:
         print(f"{i}. {file}")
     print(f"{len(files_list) + 1}. Upload a new file")
     
-    choice = int(input("Select a file number: "))
-    if choice <= len(files_list):
-        return files_list[choice - 1]
-    else:
+    while True:
         try:
-            uploaded = files.upload()
-            return list(uploaded.keys())[0]
-        except NameError:
-            print("File upload not available outside of Colab")
-            return input("Please enter the file path: ")
+            choice = int(input("Select a file number: "))
+            if 1 <= choice <= len(files_list):
+                return files_list[choice - 1]
+            elif choice == len(files_list) + 1:
+                uploaded = files.upload()
+                if uploaded:
+                    return list(uploaded.keys())[0]
+                else:
+                    print("No file was uploaded. Please try again.")
+            else:
+                print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
 
 # 3.3. Data import
 def import_data(file_path: str) -> pd.DataFrame:
@@ -117,22 +122,26 @@ def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_a
 
 # 3.7. Results saving
 def save_results(df: pd.DataFrame) -> None:
-    """Save results to CSV in both Colab and local environments."""
+    """Save results to CSV in both Colab and Google Drive, and download to local machine."""
     timestamp = datetime.now().strftime("%m%d%y_%H%M%S")
     filename = f"REAPI_Comps_{timestamp}.csv"
     
-    for folder in [OUTPUT_FOLDER, COLAB_OUTPUT_FOLDER]:
-        os.makedirs(folder, exist_ok=True)
-        path = os.path.join(folder, filename)
-        df.to_csv(path, index=False)
-        print(f"Results saved as {path}")
+    # Save in Colab environment
+    colab_path = os.path.join(COLAB_OUTPUT_FOLDER, filename)
+    os.makedirs(COLAB_OUTPUT_FOLDER, exist_ok=True)
+    df.to_csv(colab_path, index=False)
+    print(f"Results saved in Colab as {colab_path}")
     
-    try:
-        files.download(os.path.join(COLAB_OUTPUT_FOLDER, filename))
-        print(f"Results downloaded to your local machine as {filename}")
-    except NameError:
-        print("File download not available outside of Colab")
-
+    # Save to Google Drive
+    drive_path = os.path.join(OUTPUT_FOLDER, filename)
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    df.to_csv(drive_path, index=False)
+    print(f"Results saved to Google Drive as {drive_path}")
+    
+    # Download to local machine
+    files.download(colab_path)
+    print(f"Results downloaded to your local machine as {filename}")
+    print("Please check your browser's download folder for the file.")
 # 4. Main Function
 def main():
     """Main execution function."""
