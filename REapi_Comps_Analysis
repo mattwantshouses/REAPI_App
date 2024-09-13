@@ -1,12 +1,14 @@
 # Script Name: REapi Comps Analysis
-# Version: 2.1 (Linted)
+# Version: 2.2 (JSON Error Handling)
 # Created: 09-13-24
 # Updated: 09-14-24
 # Handles importing 1 subject property with multiple comps
 # Next iteration: Handle multiple subject properties with multiple comps each, Async
 
+# 1. Import required libraries
 import os
 import json
+import re
 from datetime import datetime
 from math import radians, sin, cos, sqrt, atan2
 from typing import Dict, Any, Tuple
@@ -15,13 +17,7 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
-# Colab-specific imports
-try:
-    from google.colab import files, userdata
-except ImportError:
-    print("Running outside of Colab environment")
-
-# Constants
+# 2. Constants
 OUTPUT_FOLDER = '/content/drive/MyDrive/REapi_Comps_Results'
 COLAB_OUTPUT_FOLDER = '/content/REapi_Comps_Results'
 
@@ -30,6 +26,7 @@ FIELDS_TO_KEEP = [
     'lastSaleDate', 'lastSaleAmount', 'estimatedValue', 'latitude', 'longitude'
 ]
 
+# 3. Helper functions
 def flatten_json(nested_json: Dict[str, Any], prefix: str = '') -> Dict[str, Any]:
     """Recursively flatten a nested JSON structure."""
     flattened = {}
@@ -46,7 +43,28 @@ def flatten_json(nested_json: Dict[str, Any], prefix: str = '') -> Dict[str, Any
         else:
             flattened[new_key] = value
     return flattened
+def attempt_json_fix(json_string: str) -> str:
+    """Attempt to fix common JSON formatting issues."""
+    # Replace single quotes with double quotes
+    json_string = json_string.replace("'", '"')
+    # Add quotes to keys without quotes
+    json_string = re.sub(r'(\w+)(?=\s*:)', r'"\1"', json_string)
+    # Replace None, True, and False with their JSON equivalents
+    json_string = json_string.replace('None', 'null').replace('True', 'true').replace('False', 'false')
+    # Remove trailing commas in objects and arrays
+    json_string = re.sub(r',\s*}', '}', json_string)
+    json_string = re.sub(r',\s*\]', ']', json_string)
+    # Add missing commas between object properties
+    json_string = re.sub(r'"\s*\n\s*"', '",\n"', json_string)
+    return json_string
+# Replace None with null
+# This line is already present in the function, so we'll remove it
+# json_string = json_string.replace('None', 'null')
 
+
+# 4. Main functions
+
+# 4.1 File selection
 def select_file() -> str:
     """List files and allow user to select or upload a file."""
     files_list = [f for f in os.listdir() if f.endswith(('.json', '.txt', '.csv', '.xlsx', '.xls'))]
@@ -70,29 +88,41 @@ def select_file() -> str:
         except ValueError:
             print("Invalid input. Please enter a number.")
 
+# 4.2 Data import and parsing
 def import_data(file_path: str) -> Tuple[Dict[str, Any], pd.DataFrame]:
     """Import data from various file formats, including JSON in .txt files."""
     if file_path.endswith(('.json', '.txt')):
         with open(file_path, 'r') as f:
+            content = f.read()
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            print(f"Initial JSON parsing failed: {str(e)}")
+            print("Attempting to fix JSON formatting...")
+            fixed_content = attempt_json_fix(content)
             try:
-                data = json.load(f)
-            except json.JSONDecodeError:
-                # If JSON decoding fails, try to read as plain text
-                f.seek(0)
-                text_content = f.read()
-                # Attempt to parse the text content as JSON
-                try:
-                    data = json.loads(text_content)
-                except json.JSONDecodeError:
-                    raise ValueError(f"Unable to parse JSON from file: {file_path}")
+                data = json.loads(fixed_content)
+                print("JSON successfully parsed after fixing.")
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing failed even after attempted fix: {str(e)}")
+                print("Printing the problematic section:")
+                error_line = e.lineno
+                start = max(0, error_line - 3)
+                end = error_line + 2
+                problematic_section = fixed_content.split('\n')[start:end]
+                for i, line in enumerate(problematic_section, start=start+1):
+                    print(f"{i}: {line}")
+                print("\nPlease check the input file for formatting issues.")
+                raise
 
-        # Process the JSON data
         if 'comps' in data and 'input' in data:
             subject_data = data['input']
             flattened_data = [flatten_json(comp) for comp in data['comps']]
             df = pd.DataFrame(flattened_data)
             return subject_data, df
         raise ValueError("JSON does not contain 'comps' and 'input' keys")
+
+
 
     if file_path.endswith('.csv'):
         df = pd.read_csv(file_path)
@@ -105,6 +135,7 @@ def import_data(file_path: str) -> Tuple[Dict[str, Any], pd.DataFrame]:
     df = df.drop(columns=[col for col in df.columns if col.startswith('subject_')])
     return subject_data, df
 
+# 4.3 Data cleaning and preprocessing
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     """Clean and preprocess the data."""
     df = df.fillna(0)
@@ -116,11 +147,13 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     return df
 
+# 4.4 Price per square foot calculation
 def calculate_ppsf(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate price per square foot."""
     df['price_per_sqft'] = df['lastSaleAmount'] / df['squareFeet']
     return df
 
+# 4.5 Distance calculation
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate the distance between two points on Earth in miles."""
     radius = 3959  # Earth's radius in miles
@@ -135,6 +168,7 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
 
     return distance
 
+# 4.6 Results formatting
 def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_arv: float, avg_ppsf: float) -> pd.DataFrame:
     """Format the results into a DataFrame."""
     results = {
@@ -159,45 +193,40 @@ def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_a
 
     return pd.DataFrame([results])
 
+# 4.7 Results saving
 def save_results(df: pd.DataFrame) -> None:
     """Save results to CSV in both Colab and Google Drive, and download to local machine."""
     timestamp = datetime.now().strftime("%m%d%y_%H%M%S")
     filename = f"REAPI_Comps_{timestamp}.csv"
 
-    # Save in Colab environment
     colab_path = os.path.join(COLAB_OUTPUT_FOLDER, filename)
     os.makedirs(COLAB_OUTPUT_FOLDER, exist_ok=True)
     df.to_csv(colab_path, index=False)
     print(f"Results saved in Colab as {colab_path}")
 
-    # Save to Google Drive
     drive_path = os.path.join(OUTPUT_FOLDER, filename)
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     df.to_csv(drive_path, index=False)
     print(f"Results saved to Google Drive as {drive_path}")
 
-    # Download to local machine
     files.download(colab_path)
     print(f"Results downloaded to your local machine as {filename}")
     print("Please check your browser's download folder for the file.")
 
+# 5. Main execution function
 def main():
     """Main execution function."""
     try:
-        # File selection and data import
         file_path = select_file()
         subject_data, df = import_data(file_path)
 
-        # Data cleaning and processing
         df = clean_data(df)
         df = calculate_ppsf(df)
 
-        # Calculations
         avg_ppsf = df['price_per_sqft'].mean()
         subject_sqft = float(subject_data.get('squareFeet', 0))
         est_arv = avg_ppsf * subject_sqft if subject_sqft else 0
 
-        # Distance calculation
         subject_lat = float(subject_data.get('latitude', 0))
         subject_lon = float(subject_data.get('longitude', 0))
         df['distance_from_subject'] = df.apply(
@@ -208,11 +237,9 @@ def main():
             axis=1
         )
 
-        # Results formatting and saving
         results_df = format_results(subject_data, df, est_arv, avg_ppsf)
         save_results(results_df)
 
-        # Print summary
         print(f"Processed {len(df)} comparable properties.")
         print(f"Estimated ARV: ${est_arv:.2f}")
         print(f"Average Price per Square Foot: ${avg_ppsf:.2f}")
