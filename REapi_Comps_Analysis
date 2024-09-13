@@ -27,17 +27,23 @@ OUTPUT_FOLDER = '/content/drive/MyDrive/REapi_Comps_Results'
 COLAB_OUTPUT_FOLDER = '/content/REapi_Comps_Results'
 
 # 3. Helper Functions
-# 3.1. Distance calculation
-def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculate distance between two points using Haversine formula."""
-    R = 3959  # Earth radius in miles
-    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-    c = 2 * atan2(sqrt(a), sqrt(1-a))
-    return R * c
-
+# 3.1. Recursive JSON flattening
+def flatten_json(nested_json: Dict[str, Any], prefix: str = '') -> Dict[str, Any]:
+    """Recursively flatten a nested JSON structure."""
+    flattened = {}
+    for key, value in nested_json.items():
+        new_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            flattened.update(flatten_json(value, new_key))
+        elif isinstance(value, list):
+            for i, item in enumerate(value):
+                if isinstance(item, dict):
+                    flattened.update(flatten_json(item, f"{new_key}.{i}"))
+                else:
+                    flattened[f"{new_key}.{i}"] = item
+        else:
+            flattened[new_key] = value
+    return flattened
 # 3.2. File selection
 def select_file() -> str:
     """List files and allow user to select or upload a file."""
@@ -63,46 +69,67 @@ def select_file() -> str:
         except ValueError:
             print("Invalid input. Please enter a number.")
 
-# 3.3. Data import
+# 3.3. Data import (further modified)
 def import_data(file_path: str) -> pd.DataFrame:
-    """Import data from various file formats."""
-    if file_path.endswith('.json'):
+    """Import data from various file formats, including JSON in .txt files."""
+    if file_path.endswith(('.json', '.txt')):
         with open(file_path, 'r') as f:
-            data = json.load(f)
-        return pd.json_normalize(data['comps'])
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                # If JSON decoding fails, try to read as plain text
+                f.seek(0)
+                text_content = f.read()
+                # Attempt to parse the text content as JSON
+                try:
+                    data = json.loads(text_content)
+                except json.JSONDecodeError:
+                    raise ValueError(f"Unable to parse JSON from file: {file_path}")
+
+        # Process the JSON data
+        if 'comps' in data:
+            flattened_data = [flatten_json(comp) for comp in data['comps']]
+            df = pd.DataFrame(flattened_data)
+            # Add subject property information
+            subject_info = flatten_json(data.get('input', {}))
+            for key, value in subject_info.items():
+                df[f'subject_{key}'] = value
+            return df
+        else:
+            raise ValueError("JSON does not contain 'comps' key")
+
     elif file_path.endswith('.csv'):
         return pd.read_csv(file_path)
     elif file_path.endswith(('.xlsx', '.xls')):
         return pd.read_excel(file_path)
-    elif file_path.endswith('.txt'):
-        return pd.read_csv(file_path, sep='\t')
     else:
         raise ValueError("Unsupported file format")
 
-# 3.4. Data cleaning
+# 3.4. Data cleaning (modified)
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     """Clean and preprocess the data."""
     df = df.fillna(0)
-    numeric_columns = ['bedrooms', 'bathrooms', 'yearBuilt', 'squareFeet', 'lotSquareFeet', 'lastSaleAmount', 'latitude', 'longitude']
+    numeric_columns = [col for col in df.columns if any(field in col for field in ['bedrooms', 'bathrooms', 'yearBuilt', 'squareFeet', 'lotSquareFeet', 'lastSaleAmount', 'latitude', 'longitude'])]
     for col in numeric_columns:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df[col] = pd.to_numeric(df[col], errors='coerce')
     return df
 
-# 3.5. Price per square foot calculation
+# 3.5. Price per square foot calculation (modified)
 def calculate_ppsf(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate price per square foot."""
-    if 'lastSaleAmount' in df.columns and 'squareFeet' in df.columns:
-        df['price_per_sqft'] = df['lastSaleAmount'] / df['squareFeet']
+    sale_amount_col = next((col for col in df.columns if 'lastSaleAmount' in col), None)
+    sqft_col = next((col for col in df.columns if 'squareFeet' in col), None)
+    if sale_amount_col and sqft_col:
+        df['price_per_sqft'] = df[sale_amount_col] / df[sqft_col]
     else:
         print("Warning: Unable to calculate price per square foot due to missing columns")
     return df
 
-# 3.6. Results formatting
+# 3.6. Results formatting (modified)
 def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_arv: float, avg_ppsf: float) -> pd.DataFrame:
     """Format the results into a DataFrame."""
     results = {
-        'subject_address': subject_data.get('address', {}).get('address', 'N/A'),
+        'subject_address': subject_data.get('address', 'N/A'),
         'subject_beds': subject_data.get('bedrooms', 'N/A'),
         'subject_baths': subject_data.get('bathrooms', 'N/A'),
         'subject_year_built': subject_data.get('yearBuilt', 'N/A'),
@@ -142,7 +169,7 @@ def save_results(df: pd.DataFrame) -> None:
     files.download(colab_path)
     print(f"Results downloaded to your local machine as {filename}")
     print("Please check your browser's download folder for the file.")
-# 4. Main Function
+# 4. Main Function (modified)
 def main():
     """Main execution function."""
     try:
@@ -155,17 +182,24 @@ def main():
         df = calculate_ppsf(df)
         
         # 4.3. Extract subject property data
-        subject_data = json.loads(df.to_json(orient='records'))[0]
+        subject_columns = [col for col in df.columns if col.startswith('subject_')]
+        subject_data = df[subject_columns].iloc[0].to_dict()
+        
+        # Remove subject columns from the main dataframe
+        df = df.drop(columns=subject_columns)
         
         # 4.4. Calculations
         avg_ppsf = df['price_per_sqft'].mean() if 'price_per_sqft' in df.columns else 0
-        est_arv = avg_ppsf * float(subject_data.get('squareFeet', 0))
+        subject_sqft = float(subject_data.get('subject_squareFeet', 0))
+        est_arv = avg_ppsf * subject_sqft if subject_sqft else 0
         
         # 4.5. Distance calculation
-        if all(col in df.columns for col in ['latitude', 'longitude']):
-            subject_lat = float(subject_data.get('latitude', 0))
-            subject_lon = float(subject_data.get('longitude', 0))
-            df['distance_from_subject'] = df.apply(lambda row: calculate_distance(subject_lat, subject_lon, float(row['latitude']), float(row['longitude'])), axis=1)
+        lat_col = next((col for col in df.columns if 'latitude' in col), None)
+        lon_col = next((col for col in df.columns if 'longitude' in col), None)
+        if lat_col and lon_col:
+            subject_lat = float(subject_data.get('subject_latitude', 0))
+            subject_lon = float(subject_data.get('subject_longitude', 0))
+            df['distance_from_subject'] = df.apply(lambda row: calculate_distance(subject_lat, subject_lon, float(row[lat_col]), float(row[lon_col])), axis=1)
         
         # 4.6. Results formatting and saving
         results_df = format_results(subject_data, df, est_arv, avg_ppsf)
