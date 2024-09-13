@@ -1,8 +1,10 @@
 # Script Name: REapi Comps Analysis
-# Version: 2.2 (JSON Error Handling)
+# Version: 2.5 (JSON Error Handling)
 # Created: 09-13-24
 # Updated: 09-14-24
 # Handles importing 1 subject property with multiple comps
+# adding price per sq ft to comps
+# adjusted ppsf to aim towards the top 30% values after remove top 15%
 # Next iteration: Handle multiple subject properties with multiple comps each, Async
 
 # 1. Import required libraries
@@ -27,6 +29,7 @@ FIELDS_TO_KEEP = [
 ]
 
 # 3. Helper functions
+# 3.1 Flatten JSON
 def flatten_json(nested_json: Dict[str, Any], prefix: str = '') -> Dict[str, Any]:
     """Recursively flatten a nested JSON structure."""
     flattened = {}
@@ -43,6 +46,8 @@ def flatten_json(nested_json: Dict[str, Any], prefix: str = '') -> Dict[str, Any
         else:
             flattened[new_key] = value
     return flattened
+
+# 3.2 Attempt to fix issues with JSON formatting
 def attempt_json_fix(json_string: str) -> str:
     """Attempt to fix common JSON formatting issues."""
     # Replace single quotes with double quotes
@@ -57,10 +62,36 @@ def attempt_json_fix(json_string: str) -> str:
     # Add missing commas between object properties
     json_string = re.sub(r'"\s*\n\s*"', '",\n"', json_string)
     return json_string
-# Replace None with null
-# This line is already present in the function, so we'll remove it
-# json_string = json_string.replace('None', 'null')
 
+# 3.3 Remove PPSF outliers
+def calculate_adjusted_arv(comps_data: pd.DataFrame, subject_sqft: float, outlier_percent: float = 0.15, top_percent: float = 0.30) -> tuple:
+    """
+    Calculate adjusted ARV focusing on top 30% of comps after removing top 15% outliers.
+    
+    :param comps_data: DataFrame containing the comp data with 'price_per_sqft' column
+    :param subject_sqft: Square footage of the subject property
+    :param outlier_percent: Percentage of top values to remove as outliers (default 15%)
+    :param top_percent: Percentage of top remaining values to focus on (default 30%)
+    :return: Tuple of (adjusted ARV, adjusted average PPSF)
+    """
+    # Sort PPSF in descending order
+    sorted_ppsf = sorted(comps_data['price_per_sqft'], reverse=True)
+    
+    # Remove top 15% as outliers
+    outlier_cutoff = int(len(sorted_ppsf) * outlier_percent)
+    filtered_ppsf = sorted_ppsf[outlier_cutoff:]
+    
+    # Focus on top 30% of remaining data
+    top_cutoff = int(len(filtered_ppsf) * top_percent)
+    selected_ppsf = filtered_ppsf[:top_cutoff]
+    
+    # Calculate average PPSF from selected range
+    avg_ppsf = np.mean(selected_ppsf)
+    
+    # Calculate adjusted ARV
+    adjusted_arv = avg_ppsf * subject_sqft
+    
+    return adjusted_arv, avg_ppsf
 
 # 4. Main functions
 
@@ -176,20 +207,36 @@ def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_a
         'subject_beds': subject_data.get('bedrooms', 'N/A'),
         'subject_baths': subject_data.get('bathrooms', 'N/A'),
         'subject_year_built': subject_data.get('yearBuilt', 'N/A'),
-        'subject_sqft': subject_data.get('squareFeet', 'N/A'),
-        'subject_lot_size': subject_data.get('lotSquareFeet', 'N/A'),
-        'est_arv': est_arv,
-        'avg_ppsf': avg_ppsf,
+        'subject_sqft': round(float(subject_data.get('squareFeet', 0)), 2),
+        'subject_lot_size': round(float(subject_data.get('lotSquareFeet', 0)), 2),
+        'est_arv': round(est_arv, 2),
+        'avg_ppsf': round(avg_ppsf, 2),
         'num_comps': len(comps_data)
     }
+    # Calculate and add PPSF for each comp
+    for i, comp in comps_data.iterrows():
+        comp_prefix = f'comp_{i+1}_'
+        sold_price = comp.get('lastSaleAmount', 0)
+        square_feet = comp.get('squareFeet', 0)
+        if square_feet > 0:
+            ppsf = round(sold_price / square_feet, 2)
+        else:
+            ppsf = 0
+        results[f'{comp_prefix}ppsf'] = ppsf
 
     for i, comp in comps_data.iterrows():
         comp_prefix = f'comp_{i+1}_'
         results[f'{comp_prefix}address'] = comp.get('address.address', 'N/A')
         for field in FIELDS_TO_KEEP:
             if field != 'address':
-                results[f'{comp_prefix}{field}'] = comp.get(field, 'N/A')
-        results[f'{comp_prefix}distance_miles'] = comp.get('distance_from_subject', 'N/A')
+                value = comp.get(field, 'N/A')
+                if field in ['latitude', 'longitude']:
+                    results[f'{comp_prefix}{field}'] = value
+                elif isinstance(value, (int, float)):
+                    results[f'{comp_prefix}{field}'] = round(float(value), 2)
+                else:
+                    results[f'{comp_prefix}{field}'] = value
+        results[f'{comp_prefix}distance_miles'] = round(float(comp.get('distance_from_subject', 0)), 2)
 
     return pd.DataFrame([results])
 
@@ -214,6 +261,7 @@ def save_results(df: pd.DataFrame) -> None:
     print("Please check your browser's download folder for the file.")
 
 # 5. Main execution function
+# 5. Main execution function
 def main():
     """Main execution function."""
     try:
@@ -223,9 +271,13 @@ def main():
         df = clean_data(df)
         df = calculate_ppsf(df)
 
-        avg_ppsf = df['price_per_sqft'].mean()
+        # Calculate initial average PPSF and ARV
+        initial_avg_ppsf = df['price_per_sqft'].mean()
         subject_sqft = float(subject_data.get('squareFeet', 0))
-        est_arv = avg_ppsf * subject_sqft if subject_sqft else 0
+        initial_est_arv = initial_avg_ppsf * subject_sqft if subject_sqft else 0
+
+        # Calculate adjusted ARV
+        adjusted_arv, adjusted_avg_ppsf = calculate_adjusted_arv(df, subject_sqft)
 
         subject_lat = float(subject_data.get('latitude', 0))
         subject_lon = float(subject_data.get('longitude', 0))
@@ -237,15 +289,18 @@ def main():
             axis=1
         )
 
-        results_df = format_results(subject_data, df, est_arv, avg_ppsf)
+        results_df = format_results(subject_data, df, adjusted_arv, adjusted_avg_ppsf)
         save_results(results_df)
 
         print(f"Processed {len(df)} comparable properties.")
-        print(f"Estimated ARV: ${est_arv:.2f}")
-        print(f"Average Price per Square Foot: ${avg_ppsf:.2f}")
+        print(f"Initial Estimated ARV: ${initial_est_arv:.2f}")
+        print(f"Initial Average Price per Square Foot: ${initial_avg_ppsf:.2f}")
+        print(f"Adjusted Estimated ARV: ${adjusted_arv:.2f}")
+        print(f"Adjusted Average Price per Square Foot: ${adjusted_avg_ppsf:.2f}")
 
     except Exception as e:
         print(f"An error occurred: {str(e)}")
+
 
 if __name__ == "__main__":
     main()
