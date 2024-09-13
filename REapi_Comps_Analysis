@@ -1,0 +1,190 @@
+# Script Name: REapi Comps Analysis
+# Version: 1.2
+# Created: 09-13-24
+# Updated: 09-14-24
+# Handles importing 1 subject property with multiple comps
+# Next iteration: Handle multiple subject properties with multiple comps each, Async
+
+# 1. Imports
+import pandas as pd
+import json
+import os
+from datetime import datetime
+from math import radians, sin, cos, sqrt, atan2
+import requests
+from typing import Dict, Any, List, Optional
+from tqdm import tqdm
+
+# 1.1. Colab-specific imports
+try:
+    from google.colab import files, userdata
+except ImportError:
+    print("Running outside of Colab environment")
+
+# 2. Constants
+# 2.1. File paths and API configuration
+OUTPUT_FOLDER = '/content/drive/MyDrive/REapi_Comps_Results'
+COLAB_OUTPUT_FOLDER = '/content/REapi_Comps_Results'
+
+# 3. Helper Functions
+# 3.1. Distance calculation
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate distance between two points using Haversine formula."""
+    R = 3959  # Earth radius in miles
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1-a))
+    return R * c
+
+# 3.2. File selection
+def select_file() -> str:
+    """List files and allow user to select or upload a file."""
+    files_list = [f for f in os.listdir() if f.endswith(('.json', '.txt', '.csv', '.xlsx', '.xls'))]
+    print("Available files:")
+    for i, file in enumerate(files_list, 1):
+        print(f"{i}. {file}")
+    print(f"{len(files_list) + 1}. Upload a new file")
+    
+    choice = int(input("Select a file number: "))
+    if choice <= len(files_list):
+        return files_list[choice - 1]
+    else:
+        try:
+            uploaded = files.upload()
+            return list(uploaded.keys())[0]
+        except NameError:
+            print("File upload not available outside of Colab")
+            return input("Please enter the file path: ")
+
+# 3.3. Data import
+def import_data(file_path: str) -> pd.DataFrame:
+    """Import data from various file formats."""
+    if file_path.endswith('.json'):
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        return pd.json_normalize(data['comps'])
+    elif file_path.endswith('.csv'):
+        return pd.read_csv(file_path)
+    elif file_path.endswith(('.xlsx', '.xls')):
+        return pd.read_excel(file_path)
+    elif file_path.endswith('.txt'):
+        return pd.read_csv(file_path, sep='\t')
+    else:
+        raise ValueError("Unsupported file format")
+
+# 3.4. Data cleaning
+def clean_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean and preprocess the data."""
+    df = df.fillna(0)
+    numeric_columns = ['bedrooms', 'bathrooms', 'yearBuilt', 'squareFeet', 'lotSquareFeet', 'lastSaleAmount', 'latitude', 'longitude']
+    for col in numeric_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    return df
+
+# 3.5. Price per square foot calculation
+def calculate_ppsf(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate price per square foot."""
+    if 'lastSaleAmount' in df.columns and 'squareFeet' in df.columns:
+        df['price_per_sqft'] = df['lastSaleAmount'] / df['squareFeet']
+    else:
+        print("Warning: Unable to calculate price per square foot due to missing columns")
+    return df
+
+# 3.6. Results formatting
+def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_arv: float, avg_ppsf: float) -> pd.DataFrame:
+    """Format the results into a DataFrame."""
+    results = {
+        'subject_address': subject_data.get('address', {}).get('address', 'N/A'),
+        'subject_beds': subject_data.get('bedrooms', 'N/A'),
+        'subject_baths': subject_data.get('bathrooms', 'N/A'),
+        'subject_year_built': subject_data.get('yearBuilt', 'N/A'),
+        'subject_sqft': subject_data.get('squareFeet', 'N/A'),
+        'subject_lot_size': subject_data.get('lotSquareFeet', 'N/A'),
+        'est_arv': est_arv,
+        'avg_ppsf': avg_ppsf,
+        'num_comps': len(comps_data)
+    }
+    
+    for i, comp in comps_data.iterrows():
+        comp_prefix = f'comp_{i+1}_'
+        for col in comp.index:
+            results[comp_prefix + col] = comp[col]
+    
+    return pd.DataFrame([results])
+
+# 3.7. Results saving
+def save_results(df: pd.DataFrame) -> None:
+    """Save results to CSV in both Colab and local environments."""
+    timestamp = datetime.now().strftime("%m%d%y_%H%M%S")
+    filename = f"REAPI_Comps_{timestamp}.csv"
+    
+    for folder in [OUTPUT_FOLDER, COLAB_OUTPUT_FOLDER]:
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, filename)
+        df.to_csv(path, index=False)
+        print(f"Results saved as {path}")
+    
+    try:
+        files.download(os.path.join(COLAB_OUTPUT_FOLDER, filename))
+        print(f"Results downloaded to your local machine as {filename}")
+    except NameError:
+        print("File download not available outside of Colab")
+
+# 4. Main Function
+def main():
+    """Main execution function."""
+    try:
+        # 4.1. File selection and data import
+        file_path = select_file()
+        df = import_data(file_path)
+        
+        # 4.2. Data cleaning and processing
+        df = clean_data(df)
+        df = calculate_ppsf(df)
+        
+        # 4.3. Extract subject property data
+        subject_data = json.loads(df.to_json(orient='records'))[0]
+        
+        # 4.4. Calculations
+        avg_ppsf = df['price_per_sqft'].mean() if 'price_per_sqft' in df.columns else 0
+        est_arv = avg_ppsf * float(subject_data.get('squareFeet', 0))
+        
+        # 4.5. Distance calculation
+        if all(col in df.columns for col in ['latitude', 'longitude']):
+            subject_lat = float(subject_data.get('latitude', 0))
+            subject_lon = float(subject_data.get('longitude', 0))
+            df['distance_from_subject'] = df.apply(lambda row: calculate_distance(subject_lat, subject_lon, float(row['latitude']), float(row['longitude'])), axis=1)
+        
+        # 4.6. Results formatting and saving
+        results_df = format_results(subject_data, df, est_arv, avg_ppsf)
+        save_results(results_df)
+        
+        # 4.7. Print summary
+        print(f"Processed {len(df)} comparable properties.")
+        print(f"Estimated ARV: ${est_arv:.2f}")
+        print(f"Average Price per Square Foot: ${avg_ppsf:.2f}")
+
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+
+# 5. API Request Function (if needed)
+def make_api_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Make an API request to the specified endpoint."""
+    try:
+        api_key = userdata.get('reapi_key')
+    except NameError:
+        api_key = input("Please enter your API key: ")
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "x-api-key": api_key
+    }
+    response = requests.post(endpoint, json=payload, headers=headers)
+    return response.json()
+
+# 6. Script Execution
+if __name__ == "__main__":
+    main()
