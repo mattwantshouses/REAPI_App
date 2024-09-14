@@ -1,42 +1,70 @@
+# Retrieve Comps
+# Version 1.7
+# Trying to get async functionality working
+
 # 1. Imports
 import requests
 from google.colab import userdata, drive, files
 from datetime import datetime
+import nest_asyncio
+
+# Install nest_asyncio if not already installed
+!pip install -q nest_asyncio
 import pytz
 import json
 import os
 from typing import List, Union
 import asyncio
+import nest_asyncio
 import aiohttp
 import pandas as pd
 
+# Apply the patch 
+nest_asyncio.apply()
+
+# 1.1 Drive Mounting Function
+def mount_drive():
+    try:
+        drive_path = '/content/drive'
+        # Check if the drive is already mounted
+        if os.path.exists(drive_path) and os.listdir(drive_path):
+            print("Google Drive is already mounted.")
+            return
+        
+        # Attempt to mount the drive
+        drive.mount(drive_path)
+        print("Google Drive mounted successfully.")
+    except Exception as e:
+        print(f"Error mounting Google Drive: {str(e)}")
+        print("Proceeding without Google Drive. Files will only be saved locally.")
+
+
 # 2. Data Import Function
-def import_data(file_path: str) -> List[Union[int, str]]:
+def import_data(file_path: str = None) -> List[Union[int, str]]:
     """Import a list of property IDs or street addresses from a file."""
-    # 2.1 Initial file reading
-    with open(file_path, 'r') as f:
-        content = f.read().strip().split('\n')
+    # 2.1 File selection process
+    files_in_colab = [f for f in os.listdir() if f.endswith('.txt')]
     
-    # 2.2 File selection process
-    files_in_colab = os.listdir()
-    
-    print("Available files in Colab environment:")
+    print("Available text files in Colab environment:")
     for i, file in enumerate(files_in_colab, 1):
         print(f"{i}. {file}")
     print(f"{len(files_in_colab) + 1}. Upload your file")
     
     choice = int(input("Enter the number of the file you want to use (or upload option): "))
     
-    # 2.3 File reading based on selection
+    # 2.2 File reading based on selection
     if choice <= len(files_in_colab):
         selected_file = files_in_colab[choice - 1]
-        with open(selected_file, 'r') as f:
-            content = f.read().strip().split('\n')
     else:
         uploaded = files.upload()
         selected_file = list(uploaded.keys())[0]
-        with open(selected_file, 'r') as f:
-            content = f.read().strip().split('\n')
+    
+    # 2.3 File reading and content processing
+    with open(selected_file, 'r') as f:
+        content = f.readlines()
+    
+    # Remove whitespace and filter out empty lines
+    content = [line.strip() for line in content if line.strip()]
     
     # 2.4 Content type determination and return
     if all(line.isdigit() for line in content):
@@ -55,6 +83,7 @@ async def get_comp(session, prop, headers, url):
     
     async with session.post(url, json=payload, headers=headers) as response:
         return await response.json()
+
     
 # 3.2 Multiple Comps Retrieval Function
 async def get_comps(properties: List[Union[int, str]]):
@@ -64,7 +93,7 @@ async def get_comps(properties: List[Union[int, str]]):
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
-        "x-api-key": userdata.get('api_key')
+        "x-api-key": userdata.get('x-api-key')
     }
 
    # 3.3 Time setup
@@ -73,7 +102,8 @@ async def get_comps(properties: List[Union[int, str]]):
     formatted_time = current_time.strftime("%m%d%y_%H%M%S")
 
     # 3.4 Google Drive mounting
-    drive.mount('/content/drive')
+    mount_drive()
+
 
     # 3.5 Asynchronous API calls
     async with aiohttp.ClientSession() as session:
@@ -86,26 +116,32 @@ async def get_comps(properties: List[Union[int, str]]):
     # 3.7 Save results
     filename = f"Comps_All_{formatted_time}.csv"
     
-    # Save to Google Colab
+    # 3.7.1 Save to Google Colab
     df.to_csv(filename, index=False)
-    
-    # Save to Google Drive
-    drive_path = f'/content/drive/MyDrive/B - RMD Home Buyers/RMD Marketing/RMD Marketing Lists/2024/REAPI Comps/{filename}'
-    df.to_csv(drive_path, index=False)
-    
-    # Download to user's machine
+    print(f"File '{filename}' has been saved in Colab.")
+
+    # 3.7.2 Try to save to Google Drive if mounted
+    drive_path = '/content/drive/MyDrive/B - RMD Home Buyers/RMD Marketing/RMD Marketing Lists/2024/REAPI Comps/'
+    if os.path.exists(drive_path):
+        full_path = os.path.join(drive_path, filename)
+        df.to_csv(full_path, index=False)
+        print(f"File '{filename}' has been saved in Google Drive.")
+    else:
+        print("Google Drive not accessible. File not saved to Drive.")
+
+    # 3.7.3 Download to user's machine
     files.download(filename)
-    
-    print(f"File '{filename}' has been saved in Colab, Google Drive, and downloaded to your machine.")
+
+    print(f"File '{filename}' has been downloaded to your machine.")
 # 4. Main Function
-def main():
-    # 4.1 Input file specification
-    input_file = "property_list.txt"  # Update this with your input file name
-    # 4.2 Data import
-    properties = import_data(input_file)
-    # 4.3 Comps retrieval
-    asyncio.run(get_comps(properties))
+async def main():
+    # 4.1 Data import
+    properties = import_data()
+    # 4.2 Comps retrieval
+    await get_comps(properties)
 
 # 5. Main Execution
 if __name__ == "__main__":
-    main()
+    loop = asyncio.get_event_loop()
+    future = asyncio.ensure_future(main())
+    loop.run_until_complete(future)
