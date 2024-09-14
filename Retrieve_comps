@@ -1,5 +1,6 @@
 # Retrieve Comps
-# Version 2.0 - Adding customized parameters to the input
+# Version 2.1 - Adding customized parameters to the input
+# Future iterations - add lot size parameters
 
 # 1. Imports
 import requests
@@ -20,6 +21,11 @@ import csv
 
 # Apply the patch 
 nest_asyncio.apply()
+
+# 1.05 Define required and optional columns
+required_columns = ['data.id', 'data.propertyInfo.address.label']
+optional_columns = ['data.propertyInfo.livingSquareFeet', 'data.propertyInfo.bathrooms', 'data.propertyInfo.bedrooms', 'data.propertyInfo.yearBuilt']
+
 
 # 1.1 Drive Mounting Function
 def mount_drive():
@@ -50,40 +56,76 @@ def import_data(file_path: str = None) -> pd.DataFrame:
     
     choice = int(input("Enter the number of the file you want to use (or upload option): "))
     
-    # 2.2 File reading based on selection
+# 2.2 File reading based on selection
     if choice <= len(files_in_colab):
         selected_file = files_in_colab[choice - 1]
     else:
         uploaded = files.upload()
         selected_file = list(uploaded.keys())[0]
+
+    # 2.2.1 Debug information
+    print(f"Selected file: {selected_file}")
+    print(f"File exists: {os.path.exists(selected_file)}")
+    print(f"Full file path: {os.path.abspath(selected_file)}")
+    print(f"File size: {os.path.getsize(selected_file)} bytes")
+
+    with open(selected_file, 'r', encoding='utf-8') as f:
+        print("First few lines of the file:")
+        for i, line in enumerate(f):
+            if i < 5:  # Print first 5 lines
+                print(line.strip())
+            else:
+                break
+
+    # 2.3 Preview file contents
+    try:
+        with open(selected_file, 'r', encoding='utf-8') as f:
+            first_lines = [next(f) for _ in range(5)]
+        print("First few lines of the file:")
+        for line in first_lines:
+            print(line.strip())
+    except UnicodeDecodeError:
+        print("UTF-8 decoding failed, trying with latin-1 encoding")
+        with open(selected_file, 'r', encoding='latin-1') as f:
+            first_lines = [next(f) for _ in range(5)]
+        print("First few lines of the file:")
+        for line in first_lines:
+            print(line.strip())
+    except Exception as e:
+        print(f"Error reading file: {str(e)}")
+        return None
+
+    # 2.4 Read CSV file into DataFrame
+    try:
+        df = pd.read_csv(selected_file, encoding='utf-8')
+    except UnicodeDecodeError:
+        print("UTF-8 decoding failed, trying with latin-1 encoding")
+        df = pd.read_csv(selected_file, encoding='latin-1')
+    except Exception as e:
+        print(f"Error reading CSV: {str(e)}")
+        return None
+
+    print(f"Successfully read CSV. Shape: {df.shape}")
+    print(f"Columns: {df.columns.tolist()}")
     
-    # 2.3 Read CSV file into DataFrame
-    df = pd.read_csv(selected_file)
-    
-    # 2.4 Define required and optional columns
-    required_columns = ['square_feet', 'bathrooms', 'bedrooms', 'year_built']
-    optional_columns = ['id', 'address']
-    all_needed_columns = required_columns + optional_columns
-    
-    # 2.5 Validate required columns
-    missing_columns = [col for col in required_columns if col not in df.columns]
-    if missing_columns:
-        raise ValueError(f"CSV file is missing required columns: {', '.join(missing_columns)}")
-    
-    # 2.6 Keep only needed columns
-    df = df[df.columns.intersection(all_needed_columns)]
-    
+    # 2.5 Check for required columns
+    missing_required = [col for col in required_columns if col not in df.columns]
+    if missing_required:
+        print(f"Warning: CSV file is missing required columns: {', '.join(missing_required)}")
+
+    # 2.6 Identify column categories
+    present_required = [col for col in required_columns if col in df.columns]
+    present_optional = [col for col in optional_columns if col in df.columns]
+    extra_columns = [col for col in df.columns if col not in required_columns + optional_columns]
+
     # 2.7 Report on columns
-    present_columns = df.columns.tolist()
-    extra_columns = [col for col in df.columns if col not in all_needed_columns]
-    missing_optional = [col for col in optional_columns if col not in df.columns]
+    print("CSV file analysis:")
+    print(f"Present required columns: {', '.join(present_required)}")
+    print(f"Present optional columns: {', '.join(present_optional)}")
+    print(f"Extra columns: {', '.join(extra_columns)}")
     
-    print("CSV file successfully imported.")
-    print(f"Columns kept: {', '.join(present_columns)}")
-    if extra_columns:
-        print(f"Extra columns ignored: {', '.join(extra_columns)}")
-    if missing_optional:
-        print(f"Optional columns not found: {', '.join(missing_optional)}")
+    if missing_required:
+        print("Warning: Some required columns are missing. This may affect further processing.")
     
     return df
 
@@ -91,34 +133,58 @@ def import_data(file_path: str = None) -> pd.DataFrame:
 # 3.1 Parameter Calculation Function
 def calculate_params(row: pd.Series) -> Dict:
     """Calculate parameters for a single property."""
+    if 'data.propertyInfo.address.label' not in row or pd.isna(row['data.propertyInfo.address.label']):
+        raise ValueError("Address is not available for this property")
+
     params = {
-        "id": row.get('id'),
-        "address": row.get('address'),
+        "address": row['data.propertyInfo.address.label'],
+        "exact_match": True,
         "max_radius_miles": 1.0,
         "max_days_back": 180,
-        "max_results": 10,
-        "living_square_feet_min": max(0, int(row['square_feet']) - 400),
-        "living_square_feet_max": int(row['square_feet']) + 400,
-        "bathrooms_min": max(1, row['bathrooms'] - 1),
-        "bathrooms_max": row['bathrooms'] + 1,
-        "bedrooms_min": max(1, row['bedrooms'] - 1),
-        "bedrooms_max": row['bedrooms'] + 1,
-        "year_built_min": row['year_built'] - 10,
-        "year_built_max": row['year_built'] + 10
+        "max_results": 10
     }
-    return params
 
+    if 'data.propertyInfo.livingSquareFeet' in row and pd.notna(row['data.propertyInfo.livingSquareFeet']):
+        params.update({
+            "living_square_feet_min": max(0, int(row['data.propertyInfo.livingSquareFeet']) - 400),
+            "living_square_feet_max": int(row['data.propertyInfo.livingSquareFeet']) + 400
+        })
+    
+    if 'data.propertyInfo.bathrooms' in row and pd.notna(row['data.propertyInfo.bathrooms']):
+        params.update({
+            "bathrooms_min": max(1, row['data.propertyInfo.bathrooms'] - 1),
+            "bathrooms_max": row['data.propertyInfo.bathrooms'] + 1
+        })
+    
+    if 'data.propertyInfo.bedrooms' in row and pd.notna(row['data.propertyInfo.bedrooms']):
+        params.update({
+            "bedrooms_min": max(1, row['data.propertyInfo.bedrooms'] - 1),
+            "bedrooms_max": row['data.propertyInfo.bedrooms'] + 1
+        })
+    
+    if 'data.propertyInfo.yearBuilt' in row and pd.notna(row['data.propertyInfo.yearBuilt']):
+        params.update({
+            "year_built_min": row['data.propertyInfo.yearBuilt'] - 10,
+            "year_built_max": row['data.propertyInfo.yearBuilt'] + 10
+        })
+    
+    return params
 # 3.2 Single Comp Retrieval Function
-async def get_comp(session, params, headers, url):
+async def get_comp(session, row, headers, url):
     """Asynchronously retrieve comp for a single property."""
-    async with session.post(url, json=params, headers=headers) as response:
-        return await response.json()
+    try:
+        params = calculate_params(row)
+        async with session.post(url, json=params, headers=headers) as response:
+            return await response.json()
+    except ValueError as e:
+        print(f"Error processing row: {e}")
+        return {"error": str(e)}
 
 # 3.3 Multiple Comps Retrieval Function
 async def get_comps(properties: pd.DataFrame):
     """Retrieve comps for a list of properties and save the results."""
     # API setup
-    url = "https://api.realestateapi.com/v2/PropertyComps"
+    url = "https://api.realestateapi.com/v3/PropertyComps"
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
@@ -135,8 +201,9 @@ async def get_comps(properties: pd.DataFrame):
 
     # 3.6 Asynchronous API calls
     async with aiohttp.ClientSession() as session:
-        tasks = [get_comp(session, calculate_params(row), headers, url) for _, row in properties.iterrows()]
+        tasks = [get_comp(session, row, headers, url) for _, row in properties.iterrows()]
         results = await asyncio.gather(*tasks)
+    
     
     # 3.7 Convert results to DataFrame
     df = pd.DataFrame(results)
@@ -174,6 +241,9 @@ async def get_comps(properties: pd.DataFrame):
 async def main():
     # 4.1 Data import
     properties = import_data()
+    if properties is None:
+        print("Unable to proceed due to data import error.")
+        return
     # 4.2 Comps retrieval
     await get_comps(properties)
 
