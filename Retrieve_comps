@@ -1,23 +1,22 @@
 # Retrieve Comps
-# Version 1.7
-# Trying to get async functionality working
+# Version 2.0 - Adding customized parameters to the input
 
 # 1. Imports
 import requests
 from google.colab import userdata, drive, files
 from datetime import datetime
 import nest_asyncio
-
-# Install nest_asyncio if not already installed
-!pip install -q nest_asyncio
 import pytz
 import json
 import os
-from typing import List, Union
+from typing import List, Dict, Union
 import asyncio
-import nest_asyncio
 import aiohttp
 import pandas as pd
+import csv
+
+# Install nest_asyncio if not already installed
+!pip install -q nest_asyncio
 
 # Apply the patch 
 nest_asyncio.apply()
@@ -38,14 +37,13 @@ def mount_drive():
         print(f"Error mounting Google Drive: {str(e)}")
         print("Proceeding without Google Drive. Files will only be saved locally.")
 
-
 # 2. Data Import Function
-def import_data(file_path: str = None) -> List[Union[int, str]]:
-    """Import a list of property IDs or street addresses from a file."""
+def import_data(file_path: str = None) -> pd.DataFrame:
+    """Import property data from a CSV file."""
     # 2.1 File selection process
-    files_in_colab = [f for f in os.listdir() if f.endswith('.txt')]
+    files_in_colab = [f for f in os.listdir() if f.endswith('.csv')]
     
-    print("Available text files in Colab environment:")
+    print("Available CSV files in Colab environment:")
     for i, file in enumerate(files_in_colab, 1):
         print(f"{i}. {file}")
     print(f"{len(files_in_colab) + 1}. Upload your file")
@@ -59,34 +57,65 @@ def import_data(file_path: str = None) -> List[Union[int, str]]:
         uploaded = files.upload()
         selected_file = list(uploaded.keys())[0]
     
-    # 2.3 File reading and content processing
-    with open(selected_file, 'r') as f:
-        content = f.readlines()
+    # 2.3 Read CSV file into DataFrame
+    df = pd.read_csv(selected_file)
     
-    # Remove whitespace and filter out empty lines
-    content = [line.strip() for line in content if line.strip()]
+    # 2.4 Define required and optional columns
+    required_columns = ['square_feet', 'bathrooms', 'bedrooms', 'year_built']
+    optional_columns = ['id', 'address']
+    all_needed_columns = required_columns + optional_columns
     
-    # 2.4 Content type determination and return
-    if all(line.isdigit() for line in content):
-        return [int(line) for line in content]
-    else:
-        return content
+    # 2.5 Validate required columns
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"CSV file is missing required columns: {', '.join(missing_columns)}")
+    
+    # 2.6 Keep only needed columns
+    df = df[df.columns.intersection(all_needed_columns)]
+    
+    # 2.7 Report on columns
+    present_columns = df.columns.tolist()
+    extra_columns = [col for col in df.columns if col not in all_needed_columns]
+    missing_optional = [col for col in optional_columns if col not in df.columns]
+    
+    print("CSV file successfully imported.")
+    print(f"Columns kept: {', '.join(present_columns)}")
+    if extra_columns:
+        print(f"Extra columns ignored: {', '.join(extra_columns)}")
+    if missing_optional:
+        print(f"Optional columns not found: {', '.join(missing_optional)}")
+    
+    return df
 
 # 3. Comps Retrieval Function
-# 3.1 Single Comp Retrieval Function
-async def get_comp(session, prop, headers, url):
+# 3.1 Parameter Calculation Function
+def calculate_params(row: pd.Series) -> Dict:
+    """Calculate parameters for a single property."""
+    params = {
+        "id": row.get('id'),
+        "address": row.get('address'),
+        "max_radius_miles": 1.0,
+        "max_days_back": 180,
+        "max_results": 10,
+        "living_square_feet_min": max(0, int(row['square_feet']) - 400),
+        "living_square_feet_max": int(row['square_feet']) + 400,
+        "bathrooms_min": max(1, row['bathrooms'] - 1),
+        "bathrooms_max": row['bathrooms'] + 1,
+        "bedrooms_min": max(1, row['bedrooms'] - 1),
+        "bedrooms_max": row['bedrooms'] + 1,
+        "year_built_min": row['year_built'] - 10,
+        "year_built_max": row['year_built'] + 10
+    }
+    return params
+
+# 3.2 Single Comp Retrieval Function
+async def get_comp(session, params, headers, url):
     """Asynchronously retrieve comp for a single property."""
-    if isinstance(prop, int):
-        payload = {"id": prop}
-    else:
-        payload = {"address": prop}
-    
-    async with session.post(url, json=payload, headers=headers) as response:
+    async with session.post(url, json=params, headers=headers) as response:
         return await response.json()
 
-    
-# 3.2 Multiple Comps Retrieval Function
-async def get_comps(properties: List[Union[int, str]]):
+# 3.3 Multiple Comps Retrieval Function
+async def get_comps(properties: pd.DataFrame):
     """Retrieve comps for a list of properties and save the results."""
     # API setup
     url = "https://api.realestateapi.com/v2/PropertyComps"
@@ -96,32 +125,31 @@ async def get_comps(properties: List[Union[int, str]]):
         "x-api-key": userdata.get('x-api-key')
     }
 
-   # 3.3 Time setup
+    # 3.4 Time setup
     est = pytz.timezone('US/Eastern')
     current_time = datetime.now(est)
     formatted_time = current_time.strftime("%m%d%y_%H%M%S")
 
-    # 3.4 Google Drive mounting
+    # 3.5 Google Drive mounting
     mount_drive()
 
-
-    # 3.5 Asynchronous API calls
+    # 3.6 Asynchronous API calls
     async with aiohttp.ClientSession() as session:
-        tasks = [get_comp(session, prop, headers, url) for prop in properties]
+        tasks = [get_comp(session, calculate_params(row), headers, url) for _, row in properties.iterrows()]
         results = await asyncio.gather(*tasks)
     
-    # 3.6 Convert results to DataFrame
+    # 3.7 Convert results to DataFrame
     df = pd.DataFrame(results)
     
-    # 3.7 Save results
+    # 3.8 Save results
     filename = f"Comps_All_{formatted_time}.json"
     
-    # 3.7.1 Save to Google Colab
+    # 3.8.1 Save to Google Colab
     with open(filename, 'w') as f:
         json.dump(results, f, indent=2)
     print(f"File '{filename}' has been saved in Colab.")
 
-    # 3.7.2 Try to save to Google Drive if mounted
+    # 3.8.2 Try to save to Google Drive if mounted
     drive_base_path = '/content/drive/MyDrive/'
     drive_folder = 'REAPI Comps'  # You can adjust this folder name as needed
 
@@ -137,11 +165,11 @@ async def get_comps(properties: List[Union[int, str]]):
     else:
         print("Unable to save to Google Drive. File saved only in Colab and downloaded.")
 
-
-    # 3.7.3 Download to user's machine
+    # 3.8.3 Download to user's machine
     files.download(filename)
 
     print(f"File '{filename}' has been downloaded to your machine.")
+
 # 4. Main Function
 async def main():
     # 4.1 Data import

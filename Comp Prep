@@ -1,0 +1,158 @@
+# Comp Prep
+# Version: 1.0
+# Future iterations - add recursively flattening the JSON to csv
+
+# 1. Import necessary libraries
+import json
+import pandas as pd
+import os
+from google.colab import files
+from typing import List, Union
+import logging
+from datetime import datetime
+import pytz
+
+# 2. Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# 3. Data Import Function
+def import_data(file_path: str = None) -> List[Union[int, str]]:
+    """Import a list of property IDs or street addresses from a file."""
+    # 3.1 File selection process
+    files_in_colab = [f for f in os.listdir() if f.endswith(('.txt', '.csv', '.json', '.xls', '.xlsx'))]
+
+    print("Available files in Colab environment:")
+    for i, file in enumerate(files_in_colab, 1):
+        print(f"{i}. {file}")
+    print(f"{len(files_in_colab) + 1}. Upload your file")
+
+    choice = int(input("Enter the number of the file you want to use (or upload option): "))
+
+    # 3.2 File reading based on selection
+    if choice <= len(files_in_colab):
+        selected_file = files_in_colab[choice - 1]
+    else:
+        uploaded = files.upload()
+        selected_file = list(uploaded.keys())[0]
+
+    # 3.3 File reading and content processing
+    file_extension = os.path.splitext(selected_file)[1].lower()
+    
+    if file_extension == '.txt':
+        with open(selected_file, 'r') as f:
+            content = f.readlines()
+        content = [line.strip() for line in content if line.strip()]
+    elif file_extension == '.csv':
+        df = pd.read_csv(selected_file)
+        content = df.iloc[:, 0].tolist()
+    elif file_extension == '.json':
+        with open(selected_file, 'r') as f:
+            content = json.load(f)
+    elif file_extension in ['.xls', '.xlsx']:
+        df = pd.read_excel(selected_file)
+        content = df.iloc[:, 0].tolist()
+    else:
+        raise ValueError(f"Unsupported file type: {file_extension}")
+
+    # 3.4 Content type determination and return
+    if all(str(item).isdigit() for item in content):
+        return [int(item) for item in content]
+    else:
+        return [str(item) for item in content]
+
+# 4. JSON Processing Function
+def process_json_response(json_data: dict, fields: List[str]) -> dict:
+    """Process JSON response and extract specified fields."""
+    result = {}
+    for field in fields:
+        keys = field.split('.')
+        value = json_data
+        try:
+            for key in keys:
+                if isinstance(value, list):
+                    value = value[int(key)] if key.isdigit() else None
+                elif isinstance(value, dict):
+                    value = value.get(key)
+                else:
+                    value = None
+                if value is None:
+                    break
+            result[field] = value if value not in ({}, [], None) else None
+        except (KeyError, IndexError, TypeError):
+            result[field] = None
+    return result
+
+# 5. Main Execution Function
+def main():
+    # 5.1 Import data
+    logger.info("Starting data import process...")
+    input_data = import_data()
+    logger.info(f"Imported {len(input_data)} items")
+
+    # 5.2 Define fields to extract
+    fields = [
+        "data.propertyInfo.address.label",
+        "data.propertyInfo.bedrooms",
+        "data.propertyInfo.bathrooms",
+        "data.propertyInfo.livingSquareFeet",
+        "data.propertyInfo.yearBuilt",
+        "data.propertyInfo.lotSquareFeet",
+        "data.lotInfo.lotAcres",
+        "data.mlsActive",
+        "data.mlsPending",
+        "data.mlsHistory.0.agentEmail",
+        "data.mlsHistory.0.agentOffice",
+        "data.mlsHistory.0.agentPhone",
+        "data.mlsListingPrice",
+        "data.mlsLastStatusDate",
+        "data.mlsDaysOnMarket",
+        "data.mlsListingDate",
+        "data.mlsType",
+        "data.ownerInfo.owner1FullName",
+        "data.ownerInfo.mailAddress.label",
+        "data.ownerInfo.ownershipLength",
+        "data.outOfStateAbsenteeOwner",
+        "data.ownerOccupied",
+        "data.corporateOwned",
+        "data.lotInfo.apn",
+        "data.lotInfo.legalDescription",
+        "data.propertyInfo.pool",
+        "data.linkedProperties.totalOwned",
+        "data.id"
+    ]
+
+    # 5.3 Process JSON responses
+    logger.info("Processing JSON responses...")
+    results = []
+    total_items = len(input_data)
+    for i, item in enumerate(input_data, 1):
+        try:
+            with open(f"{item}.json", 'r') as f:
+                json_data = json.load(f)
+            processed_data = process_json_response(json_data, fields)
+            results.append(processed_data)
+            logger.info(f"Processed item {i} of {total_items} ({i/total_items*100:.2f}%)")
+        except FileNotFoundError:
+            logger.warning(f"JSON file for item {item} not found. Skipping.")
+        except json.JSONDecodeError:
+            logger.error(f"Error decoding JSON for item {item}. Skipping.")
+
+    # 5.4 Create DataFrame
+    df = pd.DataFrame(results)
+    logger.info("DataFrame created successfully")
+
+    # 5.5 Save results
+    est_tz = pytz.timezone('US/Eastern')
+    current_time = datetime.now(est_tz)
+    formatted_time = current_time.strftime("%m%d%y_%H%M%S")
+    output_file = f'propdetails for comps_{formatted_time}.csv'
+    df.to_csv(output_file, index=False)
+    logger.info(f"Results saved to {output_file}")
+
+    # 5. 6 Save to user's local machine
+    files.download(output_file)
+    logger.info(f"File {output_file} downloaded to your local machine")
+
+if __name__ == "__main__":
+    main()
