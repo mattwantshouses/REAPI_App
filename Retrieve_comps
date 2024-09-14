@@ -114,20 +114,29 @@ async def get_comps(properties: List[Union[int, str]]):
     df = pd.DataFrame(results)
     
     # 3.7 Save results
-    filename = f"Comps_All_{formatted_time}.csv"
+    filename = f"Comps_All_{formatted_time}.json"
     
     # 3.7.1 Save to Google Colab
-    df.to_csv(filename, index=False)
+    with open(filename, 'w') as f:
+        json.dump(results, f, indent=2)
     print(f"File '{filename}' has been saved in Colab.")
 
     # 3.7.2 Try to save to Google Drive if mounted
-    drive_path = '/content/drive/MyDrive/B - RMD Home Buyers/RMD Marketing/RMD Marketing Lists/2024/REAPI Comps/'
+    drive_base_path = '/content/drive/MyDrive/'
+    drive_folder = 'REAPI Comps'  # You can adjust this folder name as needed
+
+    # Create the full path, ensuring it exists
+    drive_path = os.path.join(drive_base_path, drive_folder)
+    os.makedirs(drive_path, exist_ok=True)
+
     if os.path.exists(drive_path):
         full_path = os.path.join(drive_path, filename)
-        df.to_csv(full_path, index=False)
-        print(f"File '{filename}' has been saved in Google Drive.")
+        with open(full_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"File '{filename}' has been saved in Google Drive folder '{drive_folder}'.")
     else:
-        print("Google Drive not accessible. File not saved to Drive.")
+        print("Unable to save to Google Drive. File saved only in Colab and downloaded.")
+
 
     # 3.7.3 Download to user's machine
     files.download(filename)
