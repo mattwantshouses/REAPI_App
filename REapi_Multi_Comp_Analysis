@@ -4,20 +4,31 @@
 
 
 # 1. Import required libraries
+import sys
+import subprocess
+
+# Check if ijson is installed, if not, install it
+try:
+    import ijson
+except ImportError:
+    print("ijson not found. Installing...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "ijson"])
+    import ijson
+
+# Rest of your imports
 import os
 import json
 import re
 from datetime import datetime
-from typing import Dict, Any, List, Tuple, Optional, Union
+from typing import Dict, Any, List, Tuple, Optional, Union, Iterator
 import pandas as pd
 from google.colab import files, drive
-import ijson  
 
 # 2. Constants
 BASE_DRIVE_PATH = '/content/drive/MyDrive/'
 FOLDER_NAME = 'REapi_Comps_Results'
 COLAB_OUTPUT_FOLDER = '/content/REapi_Comps_Results'
-MAX_COMPS = 10
+
 
 # 2.1 Generate output folder path
 def get_drive_output_folder(base_path: str, folder_name: str) -> str:
@@ -77,19 +88,37 @@ def flatten_list(nested_list: List[Any], prefix: str, separator: str = '.') -> D
 # 3.2 Attempt to fix issues with JSON formatting
 def attempt_json_fix(json_string: str) -> str:
     """Attempt to fix common JSON formatting issues."""
+    # Remove b' prefix and ' suffix if present
+    json_string = json_string.strip()
+    if json_string.startswith("b'") and json_string.endswith("'"):
+        json_string = json_string[2:-1]
+    
     # Replace single quotes with double quotes
     json_string = json_string.replace("'", '"')
+    
     # Add quotes to keys without quotes
     json_string = re.sub(r'(\w+)(?=\s*:)', r'"\1"', json_string)
+    
     # Replace None, True, and False with their JSON equivalents
     json_string = json_string.replace('None', 'null').replace('True', 'true').replace('False', 'false')
+    
     # Remove trailing commas in objects and arrays
     json_string = re.sub(r',\s*}', '}', json_string)
     json_string = re.sub(r',\s*\]', ']', json_string)
+    
     # Add missing commas between object properties
     json_string = re.sub(r'"\s*\n\s*"', '",\n"', json_string)
+    
+    # Add missing commas between array elements
+    json_string = re.sub(r'}\s*{', '},{', json_string)
+    
+    # Ensure the entire content is wrapped in square brackets
+    if not json_string.strip().startswith('['):
+        json_string = '[' + json_string
+    if not json_string.strip().endswith(']'):
+        json_string = json_string + ']'
+    
     return json_string
-
 # 3.3 Calculate ARV
 def calculate_arv(comps: List[Dict[str, Any]]) -> float:
     """Calculate ARV based on comp data."""
@@ -163,22 +192,51 @@ def import_data(file_path: str) -> Union[Iterator[Dict[str, Any]], pd.DataFrame]
 
 # 4.2.1 Import JSON
 def import_json(file_path: str) -> Iterator[Dict[str, Any]]:
-    """Stream import data from large JSON file."""
+    """Stream import data from large JSON file using ijson."""
+    print(f"Attempting to import JSON from {file_path}")
     with open(file_path, 'rb') as f:
         parser = ijson.parse(f)
         current_object = {}
         current_key = None
+        in_object = False
+
         for prefix, event, value in parser:
-            if prefix == '' and event == 'start_map':
-                current_object = {}
-            elif prefix == '' and event == 'end_map':
-                yield current_object
-                current_object = {}
+            if prefix == '' and event == 'start_array':
+                continue  # Skip the outer array
+            elif event == 'start_map':
+                if not in_object:
+                    in_object = True
+                    current_object = {}
+            elif event == 'end_map':
+                if in_object:
+                    yield current_object
+                    in_object = False
             elif event == 'map_key':
                 current_key = value
-            elif prefix != '' and current_key is not None:
-                current_object[current_key] = value
-                current_key = None
+            elif event in ('string', 'number', 'boolean', 'null'):
+                if current_key is not None:
+                    current_object[current_key] = value
+                    current_key = None
+
+    print("JSON import completed")
+
+# 4.2.2 Pre-process JSON
+def preprocess_json_file(input_path: str, output_path: str):
+    with open(input_path, 'r') as infile, open(output_path, 'w') as outfile:
+        content = infile.read()
+        # Remove any trailing commas before closing braces or brackets
+        content = re.sub(r',\s*}', '}', content)
+        content = re.sub(r',\s*]', ']', content)
+        # Ensure the content is wrapped in square brackets
+        if not content.strip().startswith('['):
+            content = '[' + content
+        if not content.strip().endswith(']'):
+            content = content + ']'
+        outfile.write(content)
+
+# Use this before parsing
+preprocess_json_file('Comps_All_091424_161438.json', 'cleaned_comps.json')
+# Then use the cleaned file for import_json
 
 # 4.3 Extract subject and comp data
 def extract_data(property_data: Union[Dict[str, Any], pd.Series]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -225,16 +283,34 @@ def process_properties(data: Union[List[Dict[str, Any]], pd.DataFrame]) -> pd.Da
 
     return pd.DataFrame(all_rows)
 
-# 4.4.1 Process single property
+ # 4.4.1 Process single property
 def process_property(subject: Dict[str, Any], comps: List[Dict[str, Any]], all_rows: List[Dict[str, Any]]) -> None:
     """Process a single property and its comps, adding rows to all_rows."""
     if not comps:  # Handle 404 error case
-        row = {**subject, **{f"comp_{i+1}_{field}": 'N/A' for i in range(MAX_COMPS) for field in COMP_FIELDS}}
+        row = {**subject, **{f"comp_{i+1}_{field}": 'N/A' for i in range(len(comps)) for field in COMP_FIELDS}}
         all_rows.append(row)
     else:
-        for i, comp in enumerate(comps[:MAX_COMPS]):
+        for i, comp in enumerate(comps):
             row = {**subject, **{f"comp_{i+1}_{field}": comp.get(field, 'N/A') for field in COMP_FIELDS}}
             all_rows.append(row)
+
+# 4.4.2 Process Multiple Properties Efficiently
+def process_properties_stream(data_iterator: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+    """Process properties from a stream and yield processed data."""
+    for property_entry in data_iterator:
+        subject, comps = extract_data(property_entry)
+        processed_row = process_property_stream(subject, comps)
+        yield processed_row
+
+def process_property_stream(subject: Dict[str, Any], comps: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Process a single property and its comps, returning a processed row."""
+    if not comps:  # Handle 404 error case
+        return {**subject, **{f"comp_{i+1}_{field}": 'N/A' for i in range(len(comps)) for field in COMP_FIELDS}}
+    else:
+        return {**subject, **{f"comp_{i+1}_{field}": comp.get(field, 'N/A') 
+                              for i, comp in enumerate(comps) 
+                              for field in COMP_FIELDS}}
+
 
 
 # 4.5 Save results
@@ -242,7 +318,8 @@ def save_results(df: pd.DataFrame) -> None:
     """Save results to CSV in both Colab and Google Drive, and download to local machine."""
     # Reorder columns
     subject_columns = SUBJECT_FIELDS
-    comp_columns = [f"comp_{i+1}_{field}" for i in range(MAX_COMPS) for field in COMP_FIELDS]
+    comp_columns = [f"comp_{i+1}_{field}" for i in range(df.shape[1]) for field in COMP_FIELDS 
+                    if f"comp_{i+1}_{COMP_FIELDS[0]}" in df.columns]
     df = df[subject_columns + comp_columns]
     
     timestamp = datetime.now().strftime("%m%d%y_%H%M%S")
@@ -283,7 +360,8 @@ def save_results_stream(data_iterator: Iterator[Dict[str, Any]]) -> None:
             df = pd.DataFrame(chunk)
             # Reorder columns
             subject_columns = SUBJECT_FIELDS
-            comp_columns = [f"comp_{i+1}_{field}" for i in range(MAX_COMPS) for field in COMP_FIELDS]
+            comp_columns = [f"comp_{i+1}_{field}" for i in range(df.shape[1]) for field in COMP_FIELDS 
+                            if f"comp_{i+1}_{COMP_FIELDS[0]}" in df.columns]
             df = df[subject_columns + comp_columns]
             df.to_csv(colab_path, mode='a', header=(i == chunk_size), index=False)
             df.to_csv(drive_path, mode='a', header=(i == chunk_size), index=False)
@@ -293,7 +371,8 @@ def save_results_stream(data_iterator: Iterator[Dict[str, Any]]) -> None:
         df = pd.DataFrame(chunk)
         # Reorder columns
         subject_columns = SUBJECT_FIELDS
-        comp_columns = [f"comp_{i+1}_{field}" for i in range(MAX_COMPS) for field in COMP_FIELDS]
+        comp_columns = [f"comp_{i+1}_{field}" for i in range(df.shape[1]) for field in COMP_FIELDS 
+                        if f"comp_{i+1}_{COMP_FIELDS[0]}" in df.columns]
         df = df[subject_columns + comp_columns]
         df.to_csv(colab_path, mode='a', header=(i <= chunk_size), index=False)
         df.to_csv(drive_path, mode='a', header=(i <= chunk_size), index=False)
@@ -311,9 +390,19 @@ def main() -> None:
         
         # 5.2 Process properties and 5.3 Save results
         if file_path.endswith(('.json', '.txt')):
-            data_iterator = import_json(file_path)
-            processed_data = process_properties_stream(data_iterator)
-            save_results_stream(processed_data)
+            try:
+                data_iterator = import_json(file_path)
+                processed_data = process_properties_stream(data_iterator)
+                save_results_stream(processed_data)
+            except ijson.JSONError as e:
+                print(f"JSON parsing error: {str(e)}")
+                print("Attempting to process the entire file at once...")
+                with open(file_path, 'r') as f:
+                    json_content = f.read()
+                    fixed_json = attempt_json_fix(json_content)
+                    data = json.loads(fixed_json)
+                    results_df = process_properties(data)
+                    save_results(results_df)
         else:
             data = import_data(file_path)
             results_df = process_properties(data)
