@@ -1,27 +1,39 @@
 # Script Name: REapi Comps Analysis
-# Version: 2.5 (JSON Error Handling)
+# Version: 2.6 (Multiple Addresses & Asynchronous Processing)
 # Created: 09-13-24
-# Updated: 09-14-24
-# Handles importing 1 subject property with multiple comps
+# Updated: 04-27-24
+# Handles importing multiple subject properties with multiple comps each
 # adding price per sq ft to comps
 # adjusted ppsf to aim towards the top 30% values after remove top 15%
-# Next iteration: Handle multiple subject properties with multiple comps each, Async
+# Next iteration: Improve asynchronous processing, enhance error handling
 
 # 1. Import required libraries
 import os
 import json
 import re
+import asyncio
 from datetime import datetime
 from math import radians, sin, cos, sqrt, atan2
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
 
 import pandas as pd
+import numpy as np
 import requests
 from tqdm import tqdm
+from google.colab import files
+import concurrent.futures
 
 # 2. Constants
-OUTPUT_FOLDER = '/content/drive/MyDrive/REapi_Comps_Results'
+OUTPUT_FOLDER = '/content/drive/MyDrive/'
+DRIVE_FOLDER = 'REapi_Comps_Results'
 COLAB_OUTPUT_FOLDER = '/content/REapi_Comps_Results'
+DRIVE_OUTPUT_FOLDER = os.path.join(OUTPUT_FOLDER, DRIVE_FOLDER)
+
+# Ensure the drive output folder exists
+os.makedirs(DRIVE_OUTPUT_FOLDER, exist_ok=True)
+
+print(f"Drive output folder set to: {DRIVE_OUTPUT_FOLDER}")
+
 
 FIELDS_TO_KEEP = [
     'address', 'bedrooms', 'bathrooms', 'yearBuilt', 'squareFeet', 'lotSquareFeet',
@@ -120,19 +132,20 @@ def select_file() -> str:
             print("Invalid input. Please enter a number.")
 
 # 4.2 Data import and parsing
-def import_data(file_path: str) -> Tuple[Dict[str, Any], pd.DataFrame]:
+def import_data(file_path: str) -> List[Tuple[Dict[str, Any], pd.DataFrame]]:
     """Import data from various file formats, including JSON in .txt files."""
+    subjects = []
     if file_path.endswith(('.json', '.txt')):
         with open(file_path, 'r') as f:
             content = f.read()
         try:
-            data = json.loads(content)
+            data_list = json.loads(content)
         except json.JSONDecodeError as e:
             print(f"Initial JSON parsing failed: {str(e)}")
             print("Attempting to fix JSON formatting...")
             fixed_content = attempt_json_fix(content)
             try:
-                data = json.loads(fixed_content)
+                data_list = json.loads(fixed_content)
                 print("JSON successfully parsed after fixing.")
             except json.JSONDecodeError as e:
                 print(f"JSON parsing failed even after attempted fix: {str(e)}")
@@ -146,25 +159,24 @@ def import_data(file_path: str) -> Tuple[Dict[str, Any], pd.DataFrame]:
                 print("\nPlease check the input file for formatting issues.")
                 raise
 
-        if 'comps' in data and 'input' in data:
-            subject_data = data['input']
-            flattened_data = [flatten_json(comp) for comp in data['comps']]
-            df = pd.DataFrame(flattened_data)
-            return subject_data, df
-        raise ValueError("JSON does not contain 'comps' and 'input' keys")
-
-
-
-    if file_path.endswith('.csv'):
+        for data in data_list:
+            if 'comps' in data and 'input' in data:
+                subject_data = data['input']
+                flattened_data = [flatten_json(comp) for comp in data['comps']]
+                df = pd.DataFrame(flattened_data)
+                subjects.append((subject_data, df))
+            else:
+                print("JSON entry does not contain 'comps' and 'input' keys. Skipping this entry.")
+    elif file_path.endswith('.csv'):
         df = pd.read_csv(file_path)
+        subjects.append(df)
     elif file_path.endswith(('.xlsx', '.xls')):
         df = pd.read_excel(file_path)
+        subjects.append(df)
     else:
         raise ValueError("Unsupported file format")
 
-    subject_data = df[df.columns[df.columns.str.startswith('subject_')]].iloc[0].to_dict()
-    df = df.drop(columns=[col for col in df.columns if col.startswith('subject_')])
-    return subject_data, df
+    return subjects
 
 # 4.3 Data cleaning and preprocessing
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -260,15 +272,11 @@ def save_results(df: pd.DataFrame) -> None:
     print(f"Results downloaded to your local machine as {filename}")
     print("Please check your browser's download folder for the file.")
 
-# 5. Main execution function
-# 5. Main execution function
-def main():
-    """Main execution function."""
+# 4.8 Process a single subject
+def process_subject(subject_data: Dict[str, Any], comps_df: pd.DataFrame) -> pd.DataFrame:
+    """Process a single subject property and its comps."""
     try:
-        file_path = select_file()
-        subject_data, df = import_data(file_path)
-
-        df = clean_data(df)
+        df = clean_data(comps_df)
         df = calculate_ppsf(df)
 
         # Calculate initial average PPSF and ARV
@@ -290,17 +298,50 @@ def main():
         )
 
         results_df = format_results(subject_data, df, adjusted_arv, adjusted_avg_ppsf)
-        save_results(results_df)
 
-        print(f"Processed {len(df)} comparable properties.")
+        print(f"Processed subject at {subject_data.get('address', 'N/A')}")
         print(f"Initial Estimated ARV: ${initial_est_arv:.2f}")
         print(f"Initial Average Price per Square Foot: ${initial_avg_ppsf:.2f}")
         print(f"Adjusted Estimated ARV: ${adjusted_arv:.2f}")
         print(f"Adjusted Average Price per Square Foot: ${adjusted_avg_ppsf:.2f}")
+        print("-" * 50)
+
+        return results_df
+
+    except Exception as e:
+        print(f"An error occurred while processing subject at {subject_data.get('address', 'N/A')}: {str(e)}")
+        return pd.DataFrame()  # Return empty DataFrame on error
+
+# 5. Main execution function
+def main():
+    """Main execution function."""
+    try:
+        file_path = select_file()
+        subjects = import_data(file_path)
+
+        all_results = []
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # Submit all subjects to the executor
+            future_to_subject = {
+                executor.submit(process_subject, subject, comps): subject for subject, comps in subjects
+            }
+
+            # As each thread completes, append the result
+            for future in tqdm(concurrent.futures.as_completed(future_to_subject), total=len(future_to_subject), desc="Processing Subjects"):
+                result = future.result()
+                if not result.empty:
+                    all_results.append(result)
+
+        if all_results:
+            combined_df = pd.concat(all_results, ignore_index=True)
+            save_results(combined_df)
+            print(f"Processed {len(all_results)} subject properties.")
+        else:
+            print("No results to save.")
 
     except Exception as e:
         print(f"An error occurred: {str(e)}")
-
 
 if __name__ == "__main__":
     main()
