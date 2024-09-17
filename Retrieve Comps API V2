@@ -1,0 +1,216 @@
+# Retrieve Comps API V2
+# Version 1.8
+# Created 09/14/24
+# Last Updated: 09/17/24
+# Enhanced to handle headers and conditional API calls
+
+# 1. Imports
+import requests
+from google.colab import userdata, drive, files
+from datetime import datetime
+import nest_asyncio
+
+# Install nest_asyncio if not already installed
+!pip install -q nest_asyncio
+import pytz
+import json
+import os
+from typing import List, Union, Dict, Any
+import asyncio
+import aiohttp
+import pandas as pd
+import csv
+
+# Apply the patch
+nest_asyncio.apply()
+
+# --------------------- Added Configuration ---------------------
+# Maximum number of records to process
+MAX_RECORDS = 1000  # Update this number as needed
+# -----------------------------------------------------------------
+
+# 1.05 Define required and optional columns
+required_columns = ['data.id', 'data.propertyInfo.address.label']
+
+# 1.1 Drive Mounting Function
+def mount_drive():
+    try:
+        drive_path = '/content/drive'
+        # Check if the drive is already mounted
+        if os.path.exists(drive_path) and os.listdir(drive_path):
+            print("Google Drive is already mounted.")
+            return
+
+        # Attempt to mount the drive
+        drive.mount(drive_path)
+        print("Google Drive mounted successfully.")
+    except Exception as e:
+        print(f"Error mounting Google Drive: {str(e)}")
+        print("Proceeding without Google Drive. Files will only be saved locally.")
+
+
+# 2. Data Import Function
+def import_data(file_path: str = None) -> List[Dict[str, Any]]:
+    """Import a list of property records from a file, handling headers."""
+    # 2.1 File selection process
+    files_in_colab = [f for f in os.listdir() if f.endswith('.txt') or f.endswith('.csv')]
+
+    print("Available text/CSV files in Colab environment:")
+    for i, file in enumerate(files_in_colab, 1):
+        print(f"{i}. {file}")
+    print(f"{len(files_in_colab) + 1}. Upload your file")
+
+    choice = int(input("Enter the number of the file you want to use (or upload option): "))
+
+    # 2.2 File reading based on selection
+    if choice <= len(files_in_colab):
+        selected_file = files_in_colab[choice - 1]
+    else:
+        uploaded = files.upload()
+        selected_file = list(uploaded.keys())[0]
+
+    # 2.3 Determine file type and read accordingly
+    file_ext = os.path.splitext(selected_file)[1].lower()
+    if file_ext == '.csv':
+        df = pd.read_csv(selected_file)
+    elif file_ext == '.txt':
+        # Assuming the first line contains headers and the file is CSV-like
+        df = pd.read_csv(selected_file, delimiter='\t')  # Adjust delimiter if necessary
+    else:
+        raise ValueError("Unsupported file format. Please upload a .txt or .csv file.")
+
+    # 2.4 Validate required columns
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        print(f"Warning: The following required columns are missing: {missing_columns}")
+        print("Proceeding with available columns.")
+
+    # 2.5 Limit the number of records based on MAX_RECORDS
+    if len(df) > MAX_RECORDS:
+        print(f"Limiting to the first {MAX_RECORDS} records.")
+        df = df.head(MAX_RECORDS)
+
+    # 2.6 Convert DataFrame to list of dictionaries
+    records = df.to_dict(orient='records')
+
+    # 2.7 Check for presence of 'Address' and 'ID' in each record
+    processed_records = []
+    for record in records:
+        processed_record = {}
+        if 'data.propertyInfo.address.label' in record and pd.notna(record['data.propertyInfo.address.label']):
+            processed_record['Address'] = record['data.propertyInfo.address.label']
+        if 'data.id' in record and pd.notna(record['data.id']):
+            processed_record['ID'] = record['data.id']
+        if processed_record:
+            processed_records.append(processed_record)
+        else:
+            print("Skipping a record due to missing both Address and ID.")
+
+    return processed_records
+
+# 3. Comps Retrieval Function
+# 3.1 Single Comp Retrieval Function
+async def get_comp(session, record: Dict[str, Any], headers, url, semaphore):
+    """Asynchronously retrieve comp for a single property using Address first, then ID if needed."""
+    payload = {}
+    used_method = None
+
+    # Attempt using Address first
+    if 'Address' in record:
+        payload = {"address": record['Address']}
+        used_method = 'Address'
+    elif 'ID' in record:
+        payload = {"id": record['ID']}
+        used_method = 'ID'
+    else:
+        print("No valid identifier found for the record. Skipping.")
+        return {"error": "No valid identifier found."}
+
+    async with semaphore:
+        async with session.post(url, json=payload, headers=headers) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                error_message = await response.text()
+                print(f"Error fetching comp using {used_method} for {payload}: {response.status} - {error_message}")
+                # If Address was used and ID is available, retry with ID
+                if used_method == 'Address' and 'ID' in record:
+                    print(f"Retrying with ID for record: {record['ID']}")
+                    payload_retry = {"id": record['ID']}
+                    async with session.post(url, json=payload_retry, headers=headers) as retry_response:
+                        if retry_response.status == 200:
+                            return await retry_response.json()
+                        else:
+                            retry_error = await retry_response.text()
+                            print(f"Error fetching comp using ID for {record['ID']}: {retry_response.status} - {retry_error}")
+                            return {"error": f"Failed to retrieve comp for {record['ID']} using both Address and ID."}
+                else:
+                    return {"error": f"Failed to retrieve comp for {payload}."}
+
+# 3.2 Multiple Comps Retrieval Function
+async def get_comps(records: List[Dict[str, Any]]):
+    """Retrieve comps for a list of property records and save the results."""
+    # API setup
+    url = "https://api.realestateapi.com/v2/PropertyComps"
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "x-api-key": userdata.get('x-api-key')
+    }
+
+    # 3.3 Time setup
+    est = pytz.timezone('US/Eastern')
+    current_time = datetime.now(est)
+    formatted_time = current_time.strftime("%m%d%y_%H%M%S")
+
+    # 3.4 Google Drive mounting
+    mount_drive()
+
+    # 3.5 Asynchronous API calls with concurrency limit
+    semaphore = asyncio.Semaphore(100)  # Limit to 100 concurrent requests
+    async with aiohttp.ClientSession() as session:
+        tasks = [get_comp(session, record, headers, url, semaphore) for record in records]
+        results = await asyncio.gather(*tasks)
+
+    # 3.6 Convert results to DataFrame
+    df = pd.DataFrame(results)
+
+    # 3.7 Save results
+    filename = f"Comps_V2_{formatted_time}.json"
+
+    # 3.7.1 Save to Google Colab
+    with open(filename, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"File '{filename}' has been saved in Colab.")
+
+    # 3.7.2 Try to save to Google Drive if mounted
+    drive_base_path = '/content/drive/MyDrive/'
+    drive_folder = 'REAPI Comps'  # You can adjust this folder name as needed
+
+    # Create the full path, ensuring it exists
+    drive_path = os.path.join(drive_base_path, drive_folder)
+    os.makedirs(drive_path, exist_ok=True)
+
+    if os.path.exists(drive_path):
+        full_path = os.path.join(drive_path, filename)
+        with open(full_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"File '{filename}' has been saved in Google Drive folder '{drive_folder}'.")
+    else:
+        print("Unable to save to Google Drive. File saved only in Colab and downloaded.")
+
+    # 3.7.3 Download to user's machine
+    files.download(filename)
+
+    print(f"File '{filename}' has been downloaded to your machine.")
+
+# 4. Main Function
+async def main():
+    # 4.1 Data import
+    records = import_data()
+    # 4.2 Comps retrieval
+    await get_comps(records)
+
+# 5. Main Execution
+if __name__ == "__main__":
+    asyncio.run(main())
