@@ -1,418 +1,226 @@
-# Script Name: REapi Mutli Comps Analysis
-# Version: 3.0 (Multi-Subject Processing)
-# Created: 09-15-24
-
+# REapi Multi Comps Analysis (ChatGPT o1) Broken
+# Version: 5.1
+# Updated: 09/17/2024
 
 # 1. Import required libraries
 import sys
 import subprocess
 
-# Check if ijson is installed, if not, install it
-try:
-    import ijson
-except ImportError:
-    print("ijson not found. Installing...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "ijson"])
-    import ijson
+# 2. Install necessary packages and import data
+def install_and_import(package):
+    try:
+        __import__(package)
+    except ImportError:
+        print(f"Installing {package}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
-# Rest of your imports
+install_and_import('ijson')
+install_and_import('pandas')
+install_and_import('pytz')
+
+# 3. Import additional libraries
 import os
 import json
-import re
-from datetime import datetime
-from typing import Dict, Any, List, Tuple, Optional, Union, Iterator
+import ijson
 import pandas as pd
-from google.colab import files, drive
+from datetime import datetime, timedelta
+from google.colab import files
+import decimal 
 
-# 2. Constants
-BASE_DRIVE_PATH = '/content/drive/MyDrive/'
-FOLDER_NAME = 'REapi_Comps_Results'
-COLAB_OUTPUT_FOLDER = '/content/REapi_Comps_Results'
+# 4. Define constants and field indicators based on your pattern description
 
-
-# 2.1 Generate output folder path
-def get_drive_output_folder(base_path: str, folder_name: str) -> str:
-    """Generate the full output folder path for Google Drive."""
-    return os.path.join(base_path, folder_name)
-
-# Use the function to set the OUTPUT_FOLDER
-OUTPUT_FOLDER = get_drive_output_folder(BASE_DRIVE_PATH, FOLDER_NAME)
-
-# 2.2 Define fields for subject and comp properties
+# 4.1 Output fields for subject properties and comps
 SUBJECT_FIELDS = [
-    "label", "recordCount", "statusCode", "statusMessage", "ARV", "MAO", "StartingOffer", "availableEquity",
-    "lastSaleDate", "lastSalePrice", "ownershipLength", "owner1FullName",
-    "owner2FullName", "legalDescription", "subdivision", "apn", "apnUnformatted",
-    "ltv", "mlsDaysOnMarket", "mlsTotalUpdates", "mlsActive", "mlsPending",
-    "mlsCancelled", "mlsFailed", "mlsSold", "mlsListingPrice",
-    "mlsListingPricePerSquareFoot", "mlsListingDate", "mlsStatus", "mlsType",
-    "mlsLastStatusDate", "latitude", "longitude", "bedrooms", "bathrooms",
-    "livingSquareFeet", "lotSquareFeet", "lotAcres", "yearBuilt", "id"
+    "label",
+    "recordCount",
+    "statusCode",
+    "statusMessage",
+    "availableEquity",
+    "lastSaleDate",
+    "lastSalePrice",
+    "ownershipLength",
+    "owner1FullName",
+    "owner2FullName",
+    "legalDescription",
+    "subdivision",
+    "apn",
+    "apnUnformatted",
+    "ltv",
+    "mlsDaysOnMarket",
+    "mlsTotalUpdates",
+    "mlsActive",
+    "mlsPending",
+    "mlsCancelled",
+    "mlsFailed",
+    "mlsSold",
+    "mlsListingPrice",
+    "mlsListingPricePerSquareFoot",
+    "mlsListingDate",
+    "mlsStatus",
+    "mlsType",
+    "mlsLastStatusDate",
+    "latitude",
+    "longitude",
+    "bedrooms",
+    "bathrooms",
+    "livingSquareFeet",
+    "lotSquareFeet",
+    "lotAcres",
+    "yearBuilt",
+    "id"
 ]
 
 COMP_FIELDS = [
-    "label", "sqFt", "price", "bedrooms", "bathrooms", "livingSquareFeet",
-    "pricePerSquareFoot", "lotSquareFeet", "lotAcres", "yearBuilt",
-    "lastSaleDate", "lastSalePrice", "purchaseMethod", "latitude", "longitude", "id"
+    "label",
+    "sqFt",
+    "price",
+    "bedrooms",
+    "bathrooms",
+    "livingSquareFeet",
+    "pricePerSquareFoot",
+    "pricePerSqft",
+    "lotSquareFeet",
+    "lotAcres",
+    "yearBuilt",
+    "lastSaleDate",
+    "lastSalePrice",
+    "purchaseMethod",
+    "latitude",
+    "longitude",
+    "id"
 ]
 
-# 3. Helper functions
-# 3.1 Enhanced Flatten JSON
-def flatten_json(nested_json: Dict[str, Any], prefix: str = '', separator: str = '.') -> Dict[str, Any]:
-    """Recursively flatten a nested JSON structure, handling complex nested cases."""
-    flattened = {}
-    for key, value in nested_json.items():
-        new_key = f"{prefix}{separator}{key}" if prefix else key
-        if isinstance(value, dict):
-            flattened.update(flatten_json(value, new_key, separator))
-        elif isinstance(value, list):
-            flattened.update(flatten_list(value, new_key, separator))
-        else:
-            flattened[new_key] = value
-    return flattened
+# 5. Functions to parse and process the data
 
-# 3.1.1 Flatten list
-def flatten_list(nested_list: List[Any], prefix: str, separator: str = '.') -> Dict[str, Any]:
-    """Flatten a list, handling nested structures."""
-    flattened = {}
-    for i, item in enumerate(nested_list):
-        new_key = f"{prefix}{separator}{i}"
-        if isinstance(item, dict):
-            flattened.update(flatten_json(item, new_key, separator))
-        elif isinstance(item, list):
-            flattened.update(flatten_list(item, new_key, separator))
-        else:
-            flattened[new_key] = item
-    return flattened
-
-# 3.2 Attempt to fix issues with JSON formatting
-def attempt_json_fix(json_string: str) -> str:
-    """Attempt to fix common JSON formatting issues."""
-    # Remove b' prefix and ' suffix if present
-    json_string = json_string.strip()
-    if json_string.startswith("b'") and json_string.endswith("'"):
-        json_string = json_string[2:-1]
-    
-    # Replace single quotes with double quotes
-    json_string = json_string.replace("'", '"')
-    
-    # Add quotes to keys without quotes
-    json_string = re.sub(r'(\w+)(?=\s*:)', r'"\1"', json_string)
-    
-    # Replace None, True, and False with their JSON equivalents
-    json_string = json_string.replace('None', 'null').replace('True', 'true').replace('False', 'false')
-    
-    # Remove trailing commas in objects and arrays
-    json_string = re.sub(r',\s*}', '}', json_string)
-    json_string = re.sub(r',\s*\]', ']', json_string)
-    
-    # Add missing commas between object properties
-    json_string = re.sub(r'"\s*\n\s*"', '",\n"', json_string)
-    
-    # Add missing commas between array elements
-    json_string = re.sub(r'}\s*{', '},{', json_string)
-    
-    # Ensure the entire content is wrapped in square brackets
-    if not json_string.strip().startswith('['):
-        json_string = '[' + json_string
-    if not json_string.strip().endswith(']'):
-        json_string = json_string + ']'
-    
-    return json_string
-# 3.3 Calculate ARV
-def calculate_arv(comps: List[Dict[str, Any]]) -> float:
-    """Calculate ARV based on comp data."""
-    if not comps:
-        return 0.0
-    
-    # Sort comps by price per square foot
-    sorted_comps = sorted(comps, key=lambda x: x.get('pricePerSquareFoot', 0), reverse=True)
-    
-    # Remove top 15%
-    cutoff = int(len(sorted_comps) * 0.85)
-    filtered_comps = sorted_comps[cutoff:]
-    
-    # Take top 30% of remaining
-    top_30_percent = filtered_comps[:int(len(filtered_comps) * 0.3)]
-    
-    if not top_30_percent:
-        return 0.0
-    
-    avg_price_per_sqft = sum(comp.get('pricePerSquareFoot', 0) for comp in top_30_percent) / len(top_30_percent)
-    return avg_price_per_sqft
-
-# 3.4 Calculate MAO
-def calculate_mao(arv: float) -> float:
-    """Calculate MAO based on ARV."""
-    return arv * 0.7 - 40000
-
-# 3.5 Calculate Starting Offer
-def calculate_starting_offer(mao: float) -> float:
-    """Calculate Starting Offer based on MAO."""
-    return mao * 0.85
-
-# 4. Main functions
-# 4.1 File selection
-def select_file() -> str:
-    """List files and allow user to select or upload a file."""
-    files_list = [f for f in os.listdir() if f.endswith(('.json', '.txt', '.csv', '.xls', '.xlsx'))]
-    print("Available files:")
-    for i, file in enumerate(files_list, 1):
-        print(f"{i}. {file}")
-    print(f"{len(files_list) + 1}. Upload a new file")
-
-    while True:
-        try:
-            choice = int(input("Select a file number: "))
-            if 1 <= choice <= len(files_list):
-                return files_list[choice - 1]
-            if choice == len(files_list) + 1:
-                uploaded = files.upload()
-                if uploaded:
-                    return list(uploaded.keys())[0]
-                print("No file was uploaded. Please try again.")
-            else:
-                print("Invalid choice. Please try again.")
-        except ValueError:
-            print("Invalid input. Please enter a number.")
-
-# 4.2 Data import and parsing
-def import_data(file_path: str) -> Union[Iterator[Dict[str, Any]], pd.DataFrame]:
-    """Import data from JSON, CSV, or Excel file."""
-    file_extension = os.path.splitext(file_path)[1].lower()
-
-    if file_extension in ['.json', '.txt']:
-        return import_json(file_path)
-    elif file_extension == '.csv':
-        return pd.read_csv(file_path)
-    elif file_extension in ['.xls', '.xlsx']:
-        return pd.read_excel(file_path)
-    else:
-        raise ValueError(f"Unsupported file type: {file_extension}")
-
-# 4.2.1 Import JSON
-def import_json(file_path: str) -> Iterator[Dict[str, Any]]:
-    """Stream import data from large JSON file using ijson."""
-    print(f"Attempting to import JSON from {file_path}")
+# 5.1 Parse JSON stream
+def parse_json_stream(file_path):
+    """Parse the JSON file and yield records one by one."""
     with open(file_path, 'rb') as f:
-        parser = ijson.parse(f)
-        current_object = {}
-        current_key = None
-        in_object = False
+        # Use ijson to parse multiple concatenated JSON objects
+        objects = ijson.items(f, '', multiple_values=True)
+        for obj in objects:
+            if isinstance(obj, list):
+                for item in obj:
+                    yield item
+            else:
+                yield obj
 
-        for prefix, event, value in parser:
-            if prefix == '' and event == 'start_array':
-                continue  # Skip the outer array
-            elif event == 'start_map':
-                if not in_object:
-                    in_object = True
-                    current_object = {}
-            elif event == 'end_map':
-                if in_object:
-                    yield current_object
-                    in_object = False
-            elif event == 'map_key':
-                current_key = value
-            elif event in ('string', 'number', 'boolean', 'null'):
-                if current_key is not None:
-                    current_object[current_key] = value
-                    current_key = None
+# 5.2 Process data stream
+def process_data_stream(file_path, output_file_name):
+    """Process data and write to CSV in batches to handle very large files."""
+    records_iterator = parse_json_stream(file_path)
+    batch_size = 100
+    batch = []
+    columns_written = False
+    total_records = 0
 
-    print("JSON import completed")
+    def decimal_default(obj):
+        if isinstance(obj, decimal.Decimal):
+            return float(obj)
+        raise TypeError
 
-# 4.2.2 Pre-process JSON
-def preprocess_json_file(input_path: str, output_path: str):
-    with open(input_path, 'r') as infile, open(output_path, 'w') as outfile:
-        content = infile.read()
-        # Remove any trailing commas before closing braces or brackets
-        content = re.sub(r',\s*}', '}', content)
-        content = re.sub(r',\s*]', ']', content)
-        # Ensure the content is wrapped in square brackets
-        if not content.strip().startswith('['):
-            content = '[' + content
-        if not content.strip().endswith(']'):
-            content = content + ']'
-        outfile.write(content)
-
-# Use this before parsing
-preprocess_json_file('Comps_All_091424_161438.json', 'cleaned_comps.json')
-# Then use the cleaned file for import_json
-
-# 4.3 Extract subject and comp data
-def extract_data(property_data: Union[Dict[str, Any], pd.Series]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """Extract subject and comp data from a single property entry."""
-    if isinstance(property_data, dict):
-        flattened_data = flatten_json(property_data)
-    else:  # pd.Series
-        flattened_data = property_data.to_dict()
-    
-    subject_data = {field: flattened_data.get(field, 'N/A') for field in SUBJECT_FIELDS}
-    
-    comps_data = []
-    if 'comps' in flattened_data:
-        comps = flattened_data['comps']
-        if isinstance(comps, list):
-            for comp in comps:
-                comp_data = {field: comp.get(field, 'N/A') for field in COMP_FIELDS}
-                comps_data.append(comp_data)
-        elif isinstance(comps, str):
-            # Handle case where comps might be a string (e.g., in CSV)
+    with open(output_file_name, "w", newline="", encoding="utf-8") as csvfile:
+        while True:
             try:
-                comps_list = json.loads(comps)
-                for comp in comps_list:
-                    comp_data = {field: comp.get(field, 'N/A') for field in COMP_FIELDS}
-                    comps_data.append(comp_data)
-            except json.JSONDecodeError:
-                print(f"Warning: Could not parse comps data for subject {subject_data.get('id', 'Unknown')}")
-    
-    return subject_data, comps_data
+                record = next(records_iterator)
+                if not isinstance(record, dict):
+                    print(f"Skipping non-dictionary record: {type(record)}")
+                    continue
+                
+                # Print the entire record for debugging
+                print(f"Processing record: {json.dumps(record, indent=2, default=decimal_default)}")
+                
+                # Extract subject property and comps
+                subject_record = {}
+                comps = []
 
-# 4.4 Process all properties
-def process_properties(data: Union[List[Dict[str, Any]], pd.DataFrame]) -> pd.DataFrame:
-    """Process all properties and return a DataFrame with subjects and comps."""
-    all_rows = []
+                # Assuming the record has 'comps' key
+                for key, value in record.items():
+                    if key == 'comps':
+                        comps = value
+                    else:
+                        subject_record[key] = value
 
-    if isinstance(data, pd.DataFrame):
-        for _, row in data.iterrows():
-            subject, comps = extract_data(row)
-            process_property(subject, comps, all_rows)
-    else:
-        for property_entry in data:
-            subject, comps = extract_data(property_entry)
-            process_property(subject, comps, all_rows)
+                if not comps:
+                    # No comps, create a single record with subject fields
+                    combined_record = {field: subject_record.get(field, '') for field in SUBJECT_FIELDS}
+                    batch.append(combined_record)
+                else:
+                    for comp in comps:
+                        combined_record = {field: subject_record.get(field, '') for field in SUBJECT_FIELDS}
+                        comp_record = {f"comp_{field}": comp.get(field, '') for field in COMP_FIELDS}
+                        combined_record.update(comp_record)
+                        batch.append(combined_record)
+                
+                total_records += 1
+                if len(batch) >= batch_size:
+                    write_batch_to_csv(batch, csvfile, columns_written)
+                    columns_written = True
+                    batch = []
+                    print(f"{total_records} records processed.")
+            except StopIteration:
+                # Write any remaining records
+                if batch:
+                    write_batch_to_csv(batch, csvfile, columns_written)
+                print(f"Total records processed: {total_records}")
+                break
+            except Exception as e:
+                print(f"Error processing record: {e}")
+                # Print the problematic record
+                print(f"Problematic record: {json.dumps(record, indent=2)}")
+                continue
 
-    return pd.DataFrame(all_rows)
+    # Check if the output file is empty
+    if os.path.getsize(output_file_name) == 0:
+        print("Warning: The output file is empty. No records were processed successfully.")
 
- # 4.4.1 Process single property
-def process_property(subject: Dict[str, Any], comps: List[Dict[str, Any]], all_rows: List[Dict[str, Any]]) -> None:
-    """Process a single property and its comps, adding rows to all_rows."""
-    if not comps:  # Handle 404 error case
-        row = {**subject, **{f"comp_{i+1}_{field}": 'N/A' for i in range(len(comps)) for field in COMP_FIELDS}}
-        all_rows.append(row)
-    else:
-        for i, comp in enumerate(comps):
-            row = {**subject, **{f"comp_{i+1}_{field}": comp.get(field, 'N/A') for field in COMP_FIELDS}}
-            all_rows.append(row)
+# 5.3 Write batch to CSV
+def write_batch_to_csv(batch, csvfile, columns_written):
+    """Helper function to write a batch of records to CSV."""
+    df_batch = pd.DataFrame(batch)
+    if df_batch.empty:
+        print("Warning: Empty batch, skipping write.")
+        return
 
-# 4.4.2 Process Multiple Properties Efficiently
-def process_properties_stream(data_iterator: Iterator[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
-    """Process properties from a stream and yield processed data."""
-    for property_entry in data_iterator:
-        subject, comps = extract_data(property_entry)
-        processed_row = process_property_stream(subject, comps)
-        yield processed_row
-
-def process_property_stream(subject: Dict[str, Any], comps: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Process a single property and its comps, returning a processed row."""
-    if not comps:  # Handle 404 error case
-        return {**subject, **{f"comp_{i+1}_{field}": 'N/A' for i in range(len(comps)) for field in COMP_FIELDS}}
-    else:
-        return {**subject, **{f"comp_{i+1}_{field}": comp.get(field, 'N/A') 
-                              for i, comp in enumerate(comps) 
-                              for field in COMP_FIELDS}}
-
-
-
-# 4.5 Save results
-def save_results(df: pd.DataFrame) -> None:
-    """Save results to CSV in both Colab and Google Drive, and download to local machine."""
     # Reorder columns
-    subject_columns = SUBJECT_FIELDS
-    comp_columns = [f"comp_{i+1}_{field}" for i in range(df.shape[1]) for field in COMP_FIELDS 
-                    if f"comp_{i+1}_{COMP_FIELDS[0]}" in df.columns]
-    df = df[subject_columns + comp_columns]
+    comp_columns = [col for col in df_batch.columns if col.startswith("comp_")]
+    columns_order = SUBJECT_FIELDS + comp_columns
+    df_batch = df_batch[columns_order]
+
+    if not columns_written:
+        df_batch.to_csv(csvfile, index=False)
+    else:
+        df_batch.to_csv(csvfile, header=False, index=False)
+
+    print(f"Wrote {len(df_batch)} records to CSV.")
+
+# 6. Main function
+def main():
+    """Main function to execute the script."""
+    # Use the import_data function to get the file
+    file_name = import_data()
+
+    # Check if the file is large and handle accordingly
+    file_size = os.path.getsize(file_name)
+    print(f"File size: {file_size / (1024 * 1024):.2f} MB")
+
+    # Save the output file name
+    timestamp = (datetime.now() - timedelta(hours=5)).strftime("%Y%m%d_%H%M%S")
+    output_file_name = f"processed_comps_{timestamp}.csv"
+
+    print("Processing file...")
+    process_data_stream(file_name, output_file_name)
+
+    print(f"Data has been processed and saved to {output_file_name}.")
     
-    timestamp = datetime.now().strftime("%m%d%y_%H%M%S")
-    filename = f"REAPI_Comps_Analysis_{timestamp}.csv"
-
-    # Save in Colab
-    colab_path = os.path.join(COLAB_OUTPUT_FOLDER, filename)
-    os.makedirs(COLAB_OUTPUT_FOLDER, exist_ok=True)
-    df.to_csv(colab_path, index=False)
-    print(f"Results saved in Colab as {colab_path}")
-
-    # Save to Google Drive
-    drive_path = os.path.join(OUTPUT_FOLDER, filename)
-    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-    df.to_csv(drive_path, index=False)
-    print(f"Results saved to Google Drive as {drive_path}")
-
-    # Download to local machine
-    files.download(colab_path)
-    print(f"Results downloaded to your local machine as {filename}")
-    print("Please check your browser's download folder for the file.")
-
-def save_results_stream(data_iterator: Iterator[Dict[str, Any]]) -> None:
-    """Save results to CSV in chunks."""
-    timestamp = datetime.now().strftime("%m%d%y_%H%M%S")
-    filename = f"REAPI_Comps_Analysis_{timestamp}.csv"
-    colab_path = os.path.join(COLAB_OUTPUT_FOLDER, filename)
-    drive_path = os.path.join(OUTPUT_FOLDER, filename)
-
-    os.makedirs(COLAB_OUTPUT_FOLDER, exist_ok=True)
-    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-
-    chunk_size = 1000
-    chunk = []
-    for i, row in enumerate(data_iterator, 1):
-        chunk.append(row)
-        if i % chunk_size == 0:
-            df = pd.DataFrame(chunk)
-            # Reorder columns
-            subject_columns = SUBJECT_FIELDS
-            comp_columns = [f"comp_{i+1}_{field}" for i in range(df.shape[1]) for field in COMP_FIELDS 
-                            if f"comp_{i+1}_{COMP_FIELDS[0]}" in df.columns]
-            df = df[subject_columns + comp_columns]
-            df.to_csv(colab_path, mode='a', header=(i == chunk_size), index=False)
-            df.to_csv(drive_path, mode='a', header=(i == chunk_size), index=False)
-            chunk = []
-
-    if chunk:
-        df = pd.DataFrame(chunk)
-        # Reorder columns
-        subject_columns = SUBJECT_FIELDS
-        comp_columns = [f"comp_{i+1}_{field}" for i in range(df.shape[1]) for field in COMP_FIELDS 
-                        if f"comp_{i+1}_{COMP_FIELDS[0]}" in df.columns]
-        df = df[subject_columns + comp_columns]
-        df.to_csv(colab_path, mode='a', header=(i <= chunk_size), index=False)
-        df.to_csv(drive_path, mode='a', header=(i <= chunk_size), index=False)
-
-    print(f"Results saved in Colab as {colab_path}")
-    print(f"Results saved to Google Drive as {drive_path}")
-    print(f"Total rows processed: {i}")
-
-# 5. Main execution function
-def main() -> None:
-    """Main execution function."""
-    try:
-        # 5.1 File selection and data import
-        file_path = select_file()
-        
-        # 5.2 Process properties and 5.3 Save results
-        if file_path.endswith(('.json', '.txt')):
-            try:
-                data_iterator = import_json(file_path)
-                processed_data = process_properties_stream(data_iterator)
-                save_results_stream(processed_data)
-            except ijson.JSONError as e:
-                print(f"JSON parsing error: {str(e)}")
-                print("Attempting to process the entire file at once...")
-                with open(file_path, 'r') as f:
-                    json_content = f.read()
-                    fixed_json = attempt_json_fix(json_content)
-                    data = json.loads(fixed_json)
-                    results_df = process_properties(data)
-                    save_results(results_df)
-        else:
-            data = import_data(file_path)
-            results_df = process_properties(data)
-            save_results(results_df)
-
-        print("Processing completed successfully.")
-    except Exception as e:
-        print(f"An error occurred: {str(e)}")
-    finally:
-        print("Script execution completed.")
+    # Check if the output file is empty
+    if os.path.getsize(output_file_name) == 0:
+        print("Error: The output file is empty. Please check the logs for issues during processing.")
+    else:
+        print(f"Output file size: {os.path.getsize(output_file_name) / 1024:.2f} KB")
+    
+    # Download the CSV file
+    files.download(output_file_name)
 
 if __name__ == "__main__":
     main()
