@@ -1,5 +1,5 @@
 # Script Name: REapi Comps Analysis
-# Version: 3.1 (Fixed squareFeet Mapping for CSV PropDetails)
+# Version: 3.135 (Fixed squareFeet Mapping for CSV PropDetails)
 # Created: 09-13-24
 # Updated: 04-28-24
 # Purpose:
@@ -139,7 +139,7 @@ def select_file(file_description: str) -> str:
 
 # 4.2 Data import and parsing
 def import_data(main_file_path: str, prop_details_file_path: str) -> List[Tuple[Dict[str, Any], pd.DataFrame]]:
-    """Import data from main input file and PropDetails file, including JSON in .txt files."""
+    """Import data from Comps_V2 file and PropDetails file, including JSON in .txt files."""
     subjects = []
     
     # Import main input file
@@ -149,14 +149,14 @@ def import_data(main_file_path: str, prop_details_file_path: str) -> List[Tuple[
         try:
             data_list = json.loads(content)
         except json.JSONDecodeError as e:
-            logging.warning(f"Initial JSON parsing failed for main input file: {str(e)}")
+            logging.warning(f"Initial JSON parsing failed for Comps_V2 file: {str(e)}")
             logging.info("Attempting to fix JSON formatting...")
             fixed_content = attempt_json_fix(content)
             try:
                 data_list = json.loads(fixed_content)
-                logging.info("Main input JSON successfully parsed after fixing.")
+                logging.info("Comps_V2 JSON successfully parsed after fixing.")
             except json.JSONDecodeError as e:
-                logging.error(f"JSON parsing failed even after attempted fix for main input file: {str(e)}")
+                logging.error(f"JSON parsing failed even after attempted fix for Comps_V2 file: {str(e)}")
                 logging.info("Printing the problematic section:")
                 error_line = e.lineno
                 start = max(0, error_line - 3)
@@ -164,7 +164,7 @@ def import_data(main_file_path: str, prop_details_file_path: str) -> List[Tuple[
                 problematic_section = fixed_content.split('\n')[start:end]
                 for i, line in enumerate(problematic_section, start=start+1):
                     logging.error(f"{i}: {line}")
-                logging.error("\nPlease check the main input file for formatting issues.")
+                logging.error("\nPlease check the Comps_V2 file for formatting issues.")
                 raise
 
         # Parse main input data
@@ -175,7 +175,7 @@ def import_data(main_file_path: str, prop_details_file_path: str) -> List[Tuple[
                 df = pd.DataFrame(flattened_data)
                 subjects.append((subject_data, df))
             else:
-                logging.warning("Main input JSON entry does not contain 'comps' and 'input' keys. Skipping this entry.")
+                logging.warning("Comps_V2 JSON entry does not contain 'comps' and 'input' keys. Skipping this entry.")
 
     elif main_file_path.endswith('.csv'):
         df = pd.read_csv(main_file_path)
@@ -202,7 +202,7 @@ def import_data(main_file_path: str, prop_details_file_path: str) -> List[Tuple[
             except Exception as e:
                 logging.error(f"Failed to parse row: {e}")
     else:
-        raise ValueError("Unsupported main input file format")
+        raise ValueError("Unsupported Comps_V2 file format")
 
     # Import PropDetails file
     if prop_details_file_path.endswith('.csv'):
@@ -364,7 +364,7 @@ def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_a
         'subject_year_built': subject_year_built,
         'subject_sqft': round(subject_sqft, 2),
         'subject_lot_size': round(subject_lot_size, 2),
-        'subject_lot_acres': subject_lot_acres,
+        'subject_lot_acres': round(subject_lot_acres, 2),
         'est_arv': round(est_arv, 2),
         'avg_ppsf': round(avg_ppsf, 2),
         'num_comps': len(comps_data)
@@ -470,8 +470,8 @@ def process_subject(subject_data: Dict[str, Any], comps_df: pd.DataFrame) -> pd.
         df['distance_from_subject'] = df.apply(
             lambda row: calculate_distance(
                 subject_lat, subject_lon, 
-                float(row['latitude']) if row['latitude'] != 'N/A' else 0, 
-                float(row['longitude']) if row['longitude'] != 'N/A' else 0
+                float(row['latitude']) if row['latitude'] != 'N/A' else 0.0, 
+                float(row['longitude']) if row['longitude'] != 'N/A' else 0.0
             ), 
             axis=1
         )
@@ -496,8 +496,8 @@ def main():
     """Main execution function."""
     try:
         # Select and upload the main input file
-        main_file_path = select_file("main input")
-        logging.info(f"Selected main input file: {main_file_path}")
+        main_file_path = select_file("Comps_V2")
+        logging.info(f"Selected Comps_V2 file: {main_file_path}")
 
         # Select and upload the PropDetails file
         prop_details_file_path = select_file("PropDetails")
