@@ -1,44 +1,50 @@
 # Script Name: REapi Comps Analysis
-# Version: 2.6 (Multiple Addresses & Asynchronous Processing)
+# Version: 3.1 (Fixed squareFeet Mapping for CSV PropDetails)
 # Created: 09-13-24
-# Updated: 04-27-24
-# Handles importing multiple subject properties with multiple comps each
-# adding price per sq ft to comps
-# adjusted ppsf to aim towards the top 30% values after remove top 15%
-# Next iteration: Improve asynchronous processing, enhance error handling
+# Updated: 04-28-24
+# Purpose:
+# - Import multiple subject properties with multiple comps each.
+# - Append missing Subject Property details from PropDetails file.
+# - Calculate price per square foot and ARV.
+# - Handle missing or invalid data gracefully.
 
 # 1. Import required libraries
 import os
 import json
 import re
-import asyncio
 from datetime import datetime
 from math import radians, sin, cos, sqrt, atan2
 from typing import Dict, Any, Tuple, List
 
 import pandas as pd
 import numpy as np
-import requests
 from tqdm import tqdm
 from google.colab import files
 import concurrent.futures
+import logging
+import traceback
 
 # 2. Constants
-OUTPUT_FOLDER = '/content/drive/MyDrive/'
-DRIVE_FOLDER = 'REapi_Comps_Results'
+OUTPUT_FOLDER = '/content/drive/MyDrive/REapi_Comps_Results'
 COLAB_OUTPUT_FOLDER = '/content/REapi_Comps_Results'
-DRIVE_OUTPUT_FOLDER = os.path.join(OUTPUT_FOLDER, DRIVE_FOLDER)
-
-# Ensure the drive output folder exists
-os.makedirs(DRIVE_OUTPUT_FOLDER, exist_ok=True)
-
-print(f"Drive output folder set to: {DRIVE_OUTPUT_FOLDER}")
-
 
 FIELDS_TO_KEEP = [
     'address', 'bedrooms', 'bathrooms', 'yearBuilt', 'squareFeet', 'lotSquareFeet',
     'lastSaleDate', 'lastSaleAmount', 'estimatedValue', 'latitude', 'longitude'
 ]
+
+# Define numeric and non-numeric fields
+NUMERIC_FIELDS = [
+    'bedrooms', 'bathrooms', 'yearBuilt', 'squareFeet', 'lotSquareFeet',
+    'lastSaleAmount', 'estimatedValue', 'latitude', 'longitude'
+]
+
+NON_NUMERIC_FIELDS = [
+    'lastSaleDate'
+]
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 # 3. Helper functions
 # 3.1 Flatten JSON
@@ -71,7 +77,7 @@ def attempt_json_fix(json_string: str) -> str:
     # Remove trailing commas in objects and arrays
     json_string = re.sub(r',\s*}', '}', json_string)
     json_string = re.sub(r',\s*\]', ']', json_string)
-    # Add missing commas between object properties
+    # Add missing commas between object properties (simple heuristic)
     json_string = re.sub(r'"\s*\n\s*"', '",\n"', json_string)
     return json_string
 
@@ -98,67 +104,70 @@ def calculate_adjusted_arv(comps_data: pd.DataFrame, subject_sqft: float, outlie
     selected_ppsf = filtered_ppsf[:top_cutoff]
     
     # Calculate average PPSF from selected range
-    avg_ppsf = np.mean(selected_ppsf)
+    avg_ppsf = np.mean(selected_ppsf) if selected_ppsf else 0
     
     # Calculate adjusted ARV
-    adjusted_arv = avg_ppsf * subject_sqft
+    adjusted_arv = avg_ppsf * subject_sqft if subject_sqft else 0
     
     return adjusted_arv, avg_ppsf
 
 # 4. Main functions
 
 # 4.1 File selection
-def select_file() -> str:
+def select_file(file_description: str) -> str:
     """List files and allow user to select or upload a file."""
     files_list = [f for f in os.listdir() if f.endswith(('.json', '.txt', '.csv', '.xlsx', '.xls'))]
-    print("Available files:")
+    print(f"Available {file_description} files:")
     for i, file in enumerate(files_list, 1):
         print(f"{i}. {file}")
-    print(f"{len(files_list) + 1}. Upload a new file")
+    print(f"{len(files_list) + 1}. Upload a new {file_description} file")
 
     while True:
         try:
-            choice = int(input("Select a file number: "))
+            choice = int(input(f"Select a {file_description} file number: "))
             if 1 <= choice <= len(files_list):
                 return files_list[choice - 1]
             if choice == len(files_list) + 1:
                 uploaded = files.upload()
                 if uploaded:
                     return list(uploaded.keys())[0]
-                print("No file was uploaded. Please try again.")
+                print(f"No {file_description} file was uploaded. Please try again.")
             else:
                 print("Invalid choice. Please try again.")
         except ValueError:
             print("Invalid input. Please enter a number.")
 
 # 4.2 Data import and parsing
-def import_data(file_path: str) -> List[Tuple[Dict[str, Any], pd.DataFrame]]:
-    """Import data from various file formats, including JSON in .txt files."""
+def import_data(main_file_path: str, prop_details_file_path: str) -> List[Tuple[Dict[str, Any], pd.DataFrame]]:
+    """Import data from main input file and PropDetails file, including JSON in .txt files."""
     subjects = []
-    if file_path.endswith(('.json', '.txt')):
-        with open(file_path, 'r') as f:
+    
+    # Import main input file
+    if main_file_path.endswith(('.json', '.txt')):
+        with open(main_file_path, 'r') as f:
             content = f.read()
         try:
             data_list = json.loads(content)
         except json.JSONDecodeError as e:
-            print(f"Initial JSON parsing failed: {str(e)}")
-            print("Attempting to fix JSON formatting...")
+            logging.warning(f"Initial JSON parsing failed for main input file: {str(e)}")
+            logging.info("Attempting to fix JSON formatting...")
             fixed_content = attempt_json_fix(content)
             try:
                 data_list = json.loads(fixed_content)
-                print("JSON successfully parsed after fixing.")
+                logging.info("Main input JSON successfully parsed after fixing.")
             except json.JSONDecodeError as e:
-                print(f"JSON parsing failed even after attempted fix: {str(e)}")
-                print("Printing the problematic section:")
+                logging.error(f"JSON parsing failed even after attempted fix for main input file: {str(e)}")
+                logging.info("Printing the problematic section:")
                 error_line = e.lineno
                 start = max(0, error_line - 3)
                 end = error_line + 2
                 problematic_section = fixed_content.split('\n')[start:end]
                 for i, line in enumerate(problematic_section, start=start+1):
-                    print(f"{i}: {line}")
-                print("\nPlease check the input file for formatting issues.")
+                    logging.error(f"{i}: {line}")
+                logging.error("\nPlease check the main input file for formatting issues.")
                 raise
 
+        # Parse main input data
         for data in data_list:
             if 'comps' in data and 'input' in data:
                 subject_data = data['input']
@@ -166,34 +175,152 @@ def import_data(file_path: str) -> List[Tuple[Dict[str, Any], pd.DataFrame]]:
                 df = pd.DataFrame(flattened_data)
                 subjects.append((subject_data, df))
             else:
-                print("JSON entry does not contain 'comps' and 'input' keys. Skipping this entry.")
-    elif file_path.endswith('.csv'):
-        df = pd.read_csv(file_path)
-        subjects.append(df)
-    elif file_path.endswith(('.xlsx', '.xls')):
-        df = pd.read_excel(file_path)
-        subjects.append(df)
-    else:
-        raise ValueError("Unsupported file format")
+                logging.warning("Main input JSON entry does not contain 'comps' and 'input' keys. Skipping this entry.")
 
-    return subjects
+    elif main_file_path.endswith('.csv'):
+        df = pd.read_csv(main_file_path)
+        # Assuming the CSV has columns 'input' and 'comps' containing JSON strings
+        for _, row in df.iterrows():
+            try:
+                subject_data = json.loads(row['input'])
+                comps_data = json.loads(row['comps'])
+                flattened_data = [flatten_json(comp) for comp in comps_data]
+                comps_df = pd.DataFrame(flattened_data)
+                subjects.append((subject_data, comps_df))
+            except Exception as e:
+                logging.error(f"Failed to parse row: {e}")
+    elif main_file_path.endswith(('.xlsx', '.xls')):
+        df = pd.read_excel(main_file_path)
+        # Assuming the Excel has columns 'input' and 'comps' containing JSON strings
+        for _, row in df.iterrows():
+            try:
+                subject_data = json.loads(row['input'])
+                comps_data = json.loads(row['comps'])
+                flattened_data = [flatten_json(comp) for comp in comps_data]
+                comps_df = pd.DataFrame(flattened_data)
+                subjects.append((subject_data, comps_df))
+            except Exception as e:
+                logging.error(f"Failed to parse row: {e}")
+    else:
+        raise ValueError("Unsupported main input file format")
+
+    # Import PropDetails file
+    if prop_details_file_path.endswith('.csv'):
+        prop_df = pd.read_csv(prop_details_file_path)
+        # **4.2.1: Map 'data.propertyInfo.livingSquareFeet' to 'squareFeet'**
+        prop_df['squareFeet'] = prop_df['data.propertyInfo.livingSquareFeet']
+        # **4.2.2: Ensure 'squareFeet' is numeric**
+        prop_df['squareFeet'] = pd.to_numeric(prop_df['squareFeet'], errors='coerce').fillna(0)
+        # Standardize address formatting
+        prop_df['address_standardized'] = prop_df['data.propertyInfo.address.label'].str.strip().str.lower()
+        # Create a dictionary mapping standardized addresses to their detailed info
+        prop_details_dict = prop_df.set_index('address_standardized').to_dict('index')
+    elif prop_details_file_path.endswith(('.xlsx', '.xls')):
+        prop_df = pd.read_excel(prop_details_file_path)
+        prop_df.columns = [col.strip() for col in prop_df.columns]
+        # **4.2.3: Map 'data.propertyInfo.livingSquareFeet' to 'squareFeet'**
+        prop_df['squareFeet'] = prop_df['data.propertyInfo.livingSquareFeet']
+        # **4.2.4: Ensure 'squareFeet' is numeric**
+        prop_df['squareFeet'] = pd.to_numeric(prop_df['squareFeet'], errors='coerce').fillna(0)
+        # Standardize address formatting
+        prop_df['address_standardized'] = prop_df['data.propertyInfo.address.label'].str.strip().str.lower()
+        prop_details_dict = prop_df.set_index('address_standardized').to_dict('index')
+    elif prop_details_file_path.endswith(('.json', '.txt')):
+        with open(prop_details_file_path, 'r') as f:
+            prop_content = f.read()
+        try:
+            prop_data_list = json.loads(prop_content)
+        except json.JSONDecodeError as e:
+            logging.warning(f"Initial JSON parsing failed for PropDetails file: {str(e)}")
+            logging.info("Attempting to fix JSON formatting...")
+            fixed_prop_content = attempt_json_fix(prop_content)
+            try:
+                prop_data_list = json.loads(fixed_prop_content)
+                logging.info("PropDetails JSON successfully parsed after fixing.")
+            except json.JSONDecodeError as e:
+                logging.error(f"JSON parsing failed even after attempted fix for PropDetails file: {str(e)}")
+                logging.info("Printing the problematic section:")
+                error_line = e.lineno
+                start = max(0, error_line - 3)
+                end = error_line + 2
+                problematic_section = fixed_prop_content.split('\n')[start:end]
+                for i, line in enumerate(problematic_section, start=start+1):
+                    logging.error(f"{i}: {line}")
+                logging.error("\nPlease check the PropDetails file for formatting issues.")
+                raise
+
+        # Create a dictionary mapping addresses to their detailed info
+        prop_details_dict = {}
+        for entry in prop_data_list:
+            address = entry.get('data.propertyInfo.address.label', '').strip().lower()
+            if address:
+                prop_details_dict[address] = {
+                    'bedrooms': entry.get('data.propertyInfo.bedrooms', 'N/A'),
+                    'bathrooms': entry.get('data.propertyInfo.bathrooms', 'N/A'),
+                    'squareFeet': entry.get('data.propertyInfo.livingSquareFeet', 'N/A'),  # **For JSON, already mapped in previous version**
+                    'yearBuilt': entry.get('data.propertyInfo.yearBuilt', 'N/A'),
+                    'lotSquareFeet': entry.get('data.propertyInfo.lotSquareFeet', 'N/A'),
+                    'lotAcres': entry.get('data.lotInfo.lotAcres', 'N/A')
+                }
+            else:
+                logging.warning("PropDetails entry missing 'data.propertyInfo.address.label'. Skipping this entry.")
+
+    else:
+        raise ValueError("Unsupported PropDetails file format")
+
+    # Merge PropDetails into subjects
+    merged_subjects = []
+    for subject, comps in subjects:
+        subject_address = subject.get('address', '').strip().lower()
+        prop_details = prop_details_dict.get(subject_address, {})
+        
+        # Update subject data with PropDetails
+        subject_updated = subject.copy()
+        # Fill in missing fields from PropDetails
+        if subject_updated.get('bedrooms', 'N/A') == 'N/A':
+            subject_updated['bedrooms'] = prop_details.get('bedrooms', 'N/A')
+        if subject_updated.get('bathrooms', 'N/A') == 'N/A':
+            subject_updated['bathrooms'] = prop_details.get('bathrooms', 'N/A')
+        if subject_updated.get('squareFeet', 'N/A') == 'N/A':  # **Ensuring 'squareFeet' is correctly updated**
+            subject_updated['squareFeet'] = prop_details.get('squareFeet', 'N/A')  # **Modified Line #4.2.2 or #4.2.4**
+        if subject_updated.get('yearBuilt', 'N/A') == 'N/A':
+            subject_updated['yearBuilt'] = prop_details.get('yearBuilt', 'N/A')
+        if subject_updated.get('lotSquareFeet', 'N/A') == 'N/A':
+            subject_updated['lotSquareFeet'] = prop_details.get('lotSquareFeet', 'N/A')
+        # Add 'lotAcres' as a new field
+        subject_updated['lotAcres'] = prop_details.get('lotAcres', 'N/A')
+        
+        merged_subjects.append((subject_updated, comps))
+
+    # Log unmatched subjects
+    unmatched_subjects = [subject.get('address', 'N/A') for subject, _ in subjects if subject.get('address', '').strip().lower() not in prop_details_dict]
+    if unmatched_subjects:
+        logging.warning("The following subjects could not be matched with PropDetails:")
+        for addr in unmatched_subjects:
+            logging.warning(f"- {addr}")
+
+    return merged_subjects
 
 # 4.3 Data cleaning and preprocessing
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     """Clean and preprocess the data."""
-    df = df.fillna(0)
+    df = df.fillna('N/A')  # Ensure missing values are 'N/A'
     numeric_columns = [col for col in df.columns if any(field in col for field in [
         'bedrooms', 'bathrooms', 'yearBuilt', 'squareFeet', 'lotSquareFeet', 
         'lastSaleAmount', 'latitude', 'longitude'
     ])]
     for col in numeric_columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+        # Convert columns to numeric, replacing 'N/A' with NaN, then fill NaN with 0
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     return df
 
 # 4.4 Price per square foot calculation
 def calculate_ppsf(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate price per square foot."""
     df['price_per_sqft'] = df['lastSaleAmount'] / df['squareFeet']
+    # Replace infinite or NaN values resulting from division by zero
+    df['price_per_sqft'].replace([np.inf, -np.inf], 0, inplace=True)
+    df['price_per_sqft'].fillna(0, inplace=True)
     return df
 
 # 4.5 Distance calculation
@@ -214,41 +341,64 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
 # 4.6 Results formatting
 def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_arv: float, avg_ppsf: float) -> pd.DataFrame:
     """Format the results into a DataFrame."""
+    # Helper function to safely convert values to float
+    def safe_float(value, default=0.0):
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+
+    # Convert subject data fields using safe_float
+    subject_address = subject_data.get('address', 'N/A')
+    subject_beds = safe_float(subject_data.get('bedrooms', 0))
+    subject_baths = safe_float(subject_data.get('bathrooms', 0))
+    subject_year_built = safe_float(subject_data.get('yearBuilt', 0))
+    subject_sqft = safe_float(subject_data.get('squareFeet', 0))  # **Ensuring 'squareFeet' is correctly accessed**
+    subject_lot_size = safe_float(subject_data.get('lotSquareFeet', 0))
+    subject_lot_acres = safe_float(subject_data.get('lotAcres', 0))
+
     results = {
-        'subject_address': subject_data.get('address', 'N/A'),
-        'subject_beds': subject_data.get('bedrooms', 'N/A'),
-        'subject_baths': subject_data.get('bathrooms', 'N/A'),
-        'subject_year_built': subject_data.get('yearBuilt', 'N/A'),
-        'subject_sqft': round(float(subject_data.get('squareFeet', 0)), 2),
-        'subject_lot_size': round(float(subject_data.get('lotSquareFeet', 0)), 2),
+        'subject_address': subject_address,
+        'subject_beds': subject_beds,
+        'subject_baths': subject_baths,
+        'subject_year_built': subject_year_built,
+        'subject_sqft': round(subject_sqft, 2),
+        'subject_lot_size': round(subject_lot_size, 2),
+        'subject_lot_acres': subject_lot_acres,
         'est_arv': round(est_arv, 2),
         'avg_ppsf': round(avg_ppsf, 2),
         'num_comps': len(comps_data)
     }
+
     # Calculate and add PPSF for each comp
     for i, comp in comps_data.iterrows():
         comp_prefix = f'comp_{i+1}_'
-        sold_price = comp.get('lastSaleAmount', 0)
-        square_feet = comp.get('squareFeet', 0)
-        if square_feet > 0:
-            ppsf = round(sold_price / square_feet, 2)
-        else:
-            ppsf = 0
+        sold_price = safe_float(comp.get('lastSaleAmount', 0))
+        square_feet = safe_float(comp.get('squareFeet', 0))
+        ppsf = round(sold_price / square_feet, 2) if square_feet > 0 else 0
         results[f'{comp_prefix}ppsf'] = ppsf
 
+    # Process each comp's details
     for i, comp in comps_data.iterrows():
         comp_prefix = f'comp_{i+1}_'
-        results[f'{comp_prefix}address'] = comp.get('address.address', 'N/A')
-        for field in FIELDS_TO_KEEP:
-            if field != 'address':
-                value = comp.get(field, 'N/A')
-                if field in ['latitude', 'longitude']:
-                    results[f'{comp_prefix}{field}'] = value
-                elif isinstance(value, (int, float)):
-                    results[f'{comp_prefix}{field}'] = round(float(value), 2)
-                else:
-                    results[f'{comp_prefix}{field}'] = value
-        results[f'{comp_prefix}distance_miles'] = round(float(comp.get('distance_from_subject', 0)), 2)
+        # Access the correct address field
+        comp_address = comp.get('data.propertyInfo.address.label', '') or comp.get('address.address', 'N/A')
+        results[f'{comp_prefix}address'] = comp_address
+
+        # Process numeric fields
+        for field in NUMERIC_FIELDS:
+            value = comp.get(field, 0)
+            converted_value = safe_float(value)
+            results[f'{comp_prefix}{field}'] = round(converted_value, 2)
+
+        # Process non-numeric fields
+        for field in NON_NUMERIC_FIELDS:
+            value = comp.get(field, 'N/A')
+            results[f'{comp_prefix}{field}'] = value if value != 'N/A' else ''
+
+        # Distance in miles
+        distance = safe_float(comp.get('distance_from_subject', 0))
+        results[f'{comp_prefix}distance_miles'] = round(distance, 2)
 
     return pd.DataFrame([results])
 
@@ -258,66 +408,107 @@ def save_results(df: pd.DataFrame) -> None:
     timestamp = datetime.now().strftime("%m%d%y_%H%M%S")
     filename = f"REAPI_Comps_{timestamp}.csv"
 
-    colab_path = os.path.join(COLAB_OUTPUT_FOLDER, filename)
+    # Ensure output directories exist
     os.makedirs(COLAB_OUTPUT_FOLDER, exist_ok=True)
-    df.to_csv(colab_path, index=False)
-    print(f"Results saved in Colab as {colab_path}")
-
-    drive_path = os.path.join(OUTPUT_FOLDER, filename)
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-    df.to_csv(drive_path, index=False)
-    print(f"Results saved to Google Drive as {drive_path}")
 
+    # Save to Colab
+    colab_path = os.path.join(COLAB_OUTPUT_FOLDER, filename)
+    df.to_csv(colab_path, index=False)
+    logging.info(f"Results saved in Colab as {colab_path}")
+
+    # Save to Google Drive
+    drive_path = os.path.join(OUTPUT_FOLDER, filename)
+    df.to_csv(drive_path, index=False)
+    logging.info(f"Results saved to Google Drive as {drive_path}")
+
+    # Download to local machine
     files.download(colab_path)
-    print(f"Results downloaded to your local machine as {filename}")
-    print("Please check your browser's download folder for the file.")
+    logging.info(f"Results downloaded to your local machine as {filename}")
+    logging.info("Please check your browser's download folder for the file.")
 
 # 4.8 Process a single subject
 def process_subject(subject_data: Dict[str, Any], comps_df: pd.DataFrame) -> pd.DataFrame:
     """Process a single subject property and its comps."""
     try:
+        logging.info(f"Processing subject at {subject_data.get('address', 'N/A')}")
+        # Clean and preprocess comps data
         df = clean_data(comps_df)
         df = calculate_ppsf(df)
 
+        # Ensure subject_sqft is valid
+        subject_sqft = subject_data.get('squareFeet', 0)
+        if isinstance(subject_sqft, str):
+            subject_sqft = subject_sqft.replace(',', '').strip()
+        try:
+            subject_sqft = float(subject_sqft)
+        except:
+            logging.warning(f"Invalid squareFeet for subject at {subject_data.get('address', 'N/A')}. Setting to 0.")
+            subject_sqft = 0
+
+        # Update the subject_data with the cleaned squareFeet
+        subject_data['squareFeet'] = subject_sqft
+
         # Calculate initial average PPSF and ARV
         initial_avg_ppsf = df['price_per_sqft'].mean()
-        subject_sqft = float(subject_data.get('squareFeet', 0))
         initial_est_arv = initial_avg_ppsf * subject_sqft if subject_sqft else 0
 
         # Calculate adjusted ARV
         adjusted_arv, adjusted_avg_ppsf = calculate_adjusted_arv(df, subject_sqft)
 
-        subject_lat = float(subject_data.get('latitude', 0))
-        subject_lon = float(subject_data.get('longitude', 0))
+        # Calculate distance from subject for each comp
+        subject_lat = subject_data.get('latitude', 0)
+        subject_lon = subject_data.get('longitude', 0)
+        try:
+            subject_lat = float(subject_lat)
+            subject_lon = float(subject_lon)
+        except:
+            logging.warning(f"Invalid latitude or longitude for subject at {subject_data.get('address', 'N/A')}. Setting to 0.")
+            subject_lat = 0
+            subject_lon = 0
+
         df['distance_from_subject'] = df.apply(
             lambda row: calculate_distance(
                 subject_lat, subject_lon, 
-                float(row['latitude']), float(row['longitude'])
+                float(row['latitude']) if row['latitude'] != 'N/A' else 0, 
+                float(row['longitude']) if row['longitude'] != 'N/A' else 0
             ), 
             axis=1
         )
 
+        # Format results
         results_df = format_results(subject_data, df, adjusted_arv, adjusted_avg_ppsf)
 
-        print(f"Processed subject at {subject_data.get('address', 'N/A')}")
-        print(f"Initial Estimated ARV: ${initial_est_arv:.2f}")
-        print(f"Initial Average Price per Square Foot: ${initial_avg_ppsf:.2f}")
-        print(f"Adjusted Estimated ARV: ${adjusted_arv:.2f}")
-        print(f"Adjusted Average Price per Square Foot: ${adjusted_avg_ppsf:.2f}")
-        print("-" * 50)
+        logging.info(f"Processed subject at {subject_data.get('address', 'N/A')}")
+        logging.info(f"Adjusted Estimated ARV: ${adjusted_arv:.2f}")
+        logging.info(f"Adjusted Average Price per Square Foot: ${adjusted_avg_ppsf:.2f}")
+        logging.info("-" * 50)
 
         return results_df
 
     except Exception as e:
-        print(f"An error occurred while processing subject at {subject_data.get('address', 'N/A')}: {str(e)}")
+        logging.error(f"An error occurred while processing subject at {subject_data.get('address', 'N/A')}: {str(e)}")
+        traceback.print_exc()
         return pd.DataFrame()  # Return empty DataFrame on error
 
 # 5. Main execution function
 def main():
     """Main execution function."""
     try:
-        file_path = select_file()
-        subjects = import_data(file_path)
+        # Select and upload the main input file
+        main_file_path = select_file("main input")
+        logging.info(f"Selected main input file: {main_file_path}")
+
+        # Select and upload the PropDetails file
+        prop_details_file_path = select_file("PropDetails")
+        logging.info(f"Selected PropDetails file: {prop_details_file_path}")
+
+        # Import and merge data
+        subjects = import_data(main_file_path, prop_details_file_path)
+
+        if not subjects:
+            logging.warning("No valid subjects found. Exiting.")
+            return
 
         all_results = []
 
@@ -336,12 +527,13 @@ def main():
         if all_results:
             combined_df = pd.concat(all_results, ignore_index=True)
             save_results(combined_df)
-            print(f"Processed {len(all_results)} subject properties.")
+            logging.info(f"Processed {len(all_results)} subject properties.")
         else:
-            print("No results to save.")
+            logging.warning("No results to save.")
 
     except Exception as e:
-        print(f"An error occurred: {str(e)}")
+        logging.error(f"An error occurred: {str(e)}")
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
