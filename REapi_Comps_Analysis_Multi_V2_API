@@ -406,7 +406,7 @@ def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_a
 def save_results(df: pd.DataFrame) -> None:
     """Save results to CSV in both Colab and Google Drive, and download to local machine."""
     timestamp = datetime.now().strftime("%m%d%y_%H%M%S")
-    filename = f"REAPI_Comps_{timestamp}.csv"
+    filename = f"REAPI_Comps_Analysis_{timestamp}.csv"
 
     # Ensure output directories exist
     os.makedirs(COLAB_OUTPUT_FOLDER, exist_ok=True)
