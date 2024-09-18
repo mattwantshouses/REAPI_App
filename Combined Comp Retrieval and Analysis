@@ -1,0 +1,770 @@
+# Combined Script: Retrieve Comps and Comps Analysis
+# Version: 1.0
+# Created: [Date]
+# Updated: [Date]
+# Purpose:
+# - Import property details.
+# - Retrieve comps via API calls.
+# - Perform analysis on comps.
+# - Combine subject property details with comps analysis.
+# - Save the combined output.
+
+# 1. Import required libraries
+import os
+import json
+import re
+import csv
+from datetime import datetime
+from math import radians, sin, cos, sqrt, atan2
+from typing import Dict, Any, Tuple, List
+
+import pandas as pd
+import numpy as np
+from tqdm import tqdm
+from google.colab import files
+import concurrent.futures
+import logging
+import traceback
+import requests
+import nest_asyncio
+import pytz
+import asyncio
+import aiohttp
+
+# Apply the nest_asyncio patch
+nest_asyncio.apply()
+
+# 2. Constants
+OUTPUT_FOLDER = '/content/drive/MyDrive/REapi_Comps_Results'
+COLAB_OUTPUT_FOLDER = '/content/REapi_Comps_Results'
+
+FIELDS_TO_KEEP = [
+    'address', 'bedrooms', 'bathrooms', 'yearBuilt', 'squareFeet', 'lotSquareFeet',
+    'lastSaleDate', 'lastSaleAmount', 'estimatedValue', 'latitude', 'longitude'
+]
+
+NUMERIC_FIELDS = [
+    'bedrooms', 'bathrooms', 'yearBuilt', 'squareFeet', 'lotSquareFeet',
+    'lastSaleAmount', 'estimatedValue', 'latitude', 'longitude'
+]
+
+NON_NUMERIC_FIELDS = [
+    'lastSaleDate'
+]
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+# 3. Helper functions
+# 3.1 Flatten JSON
+def flatten_json(nested_json: Dict[str, Any], prefix: str = '') -> Dict[str, Any]:
+    """Recursively flatten a nested JSON structure."""
+    flattened = {}
+    for key, value in nested_json.items():
+        new_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            flattened.update(flatten_json(value, new_key))
+        elif isinstance(value, list):
+            for i, item in enumerate(value):
+                if isinstance(item, dict):
+                    flattened.update(flatten_json(item, f"{new_key}.{i}"))
+                else:
+                    flattened[f"{new_key}.{i}"] = item
+        else:
+            flattened[new_key] = value
+    return flattened
+
+# 3.2 Attempt to fix JSON formatting issues
+def attempt_json_fix(json_string: str) -> str:
+    """Attempt to fix common JSON formatting issues."""
+    # Replace single quotes with double quotes
+    json_string = json_string.replace("'", '"')
+    # Add quotes to keys without quotes
+    json_string = re.sub(r'(\w+)(?=\s*:)', r'"\1"', json_string)
+    # Replace None, True, and False with their JSON equivalents
+    json_string = json_string.replace('None', 'null').replace('True', 'true').replace('False', 'false')
+    # Remove trailing commas in objects and arrays
+    json_string = re.sub(r',\s*}', '}', json_string)
+    json_string = re.sub(r',\s*\]', ']', json_string)
+    # Add missing commas between object properties (simple heuristic)
+    json_string = re.sub(r'"\s*\n\s*"', '",\n"', json_string)
+    return json_string
+
+# 3.3 Detect CSV delimiter
+def detect_csv_delimiter(file_path: str) -> str:
+    """Detect the delimiter used in a CSV file."""
+    with open(file_path, 'r', newline='', encoding='utf-8') as csvfile:
+        sample = csvfile.read(1024)
+        sniffer = csv.Sniffer()
+        try:
+            dialect = sniffer.sniff(sample)
+            delimiter = dialect.delimiter
+            logging.info(f"Detected delimiter '{delimiter}' for file '{file_path}'.")
+            return delimiter
+        except csv.Error:
+            logging.warning(f"Could not detect delimiter for file '{file_path}'. Defaulting to tab '\\t'.")
+            return '\t'  # Default to tab as per your PropDetails sample
+
+# 3.4 Normalize Address
+def normalize_address(address: str) -> str:
+    """
+    Normalize address by converting to lowercase, stripping whitespace, and replacing common abbreviations.
+    
+    :param address: The address string to normalize.
+    :return: Normalized address string.
+    """
+    address = address.lower().strip()
+    # Replace common abbreviations with full forms
+    abbreviations = {
+        r'\brd\b': 'road',
+        r'\bdr\b': 'drive',
+        r'\btrl\b': 'trail',
+        r'\bst\b': 'street',
+        r'\bave\b': 'avenue',
+        r'\bblvd\b': 'boulevard',
+        r'\bln\b': 'lane',
+        r'\bct\b': 'court',
+        r'\bpkwy\b': 'parkway',
+        r'\bste\b': 'suite',
+        r'\bfl\b': 'florida'
+    }
+    for abbr, full in abbreviations.items():
+        address = re.sub(abbr, full, address)
+    # Remove extra spaces
+    address = re.sub(r'\s+', ' ', address)
+    return address
+
+# 3.5 Remove PPSF outliers
+def calculate_adjusted_arv(comps_data: pd.DataFrame, subject_sqft: float, outlier_percent: float = 0.15, top_percent: float = 0.30) -> tuple:
+    """
+    Calculate adjusted ARV focusing on top 30% of comps after removing top 15% outliers.
+    
+    :param comps_data: DataFrame containing the comp data with 'price_per_sqft' column
+    :param subject_sqft: Square footage of the subject property
+    :param outlier_percent: Percentage of top values to remove as outliers (default 15%)
+    :param top_percent: Percentage of top remaining values to focus on (default 30%)
+    :return: Tuple of (adjusted ARV, adjusted average PPSF)
+    """
+    # Sort PPSF in descending order
+    sorted_ppsf = sorted(comps_data['price_per_sqft'], reverse=True)
+    
+    # Remove top 15% as outliers
+    outlier_cutoff = int(len(sorted_ppsf) * outlier_percent)
+    filtered_ppsf = sorted_ppsf[outlier_cutoff:]
+    
+    # Focus on top 30% of remaining data
+    top_cutoff = int(len(filtered_ppsf) * top_percent)
+    selected_ppsf = filtered_ppsf[:top_cutoff]
+    
+    # Calculate average PPSF from selected range
+    avg_ppsf = np.mean(selected_ppsf) if selected_ppsf else 0
+    
+    # Calculate adjusted ARV
+    adjusted_arv = avg_ppsf * subject_sqft if subject_sqft else 0
+    
+    return adjusted_arv, avg_ppsf
+
+# 3.6 Calculate Distance
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate the distance between two points on Earth in miles."""
+    radius = 3959  # Earth's radius in miles
+
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1-a))
+    distance = radius * c
+
+    return distance
+
+# 3.7 Safe Float Conversion
+def safe_float(value, default=0.0):
+    """Safely convert a value to float, returning default on failure."""
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        logging.warning(f"Failed to convert value '{value}' to float. Setting to default {default}.")
+        return default
+
+# 4. File selection
+def select_file(file_description: str) -> str:
+    """List files and allow user to select or upload a file."""
+    files_list = [f for f in os.listdir() if f.endswith(('.json', '.txt', '.csv', '.xlsx', '.xls'))]
+    print(f"Available {file_description} files:")
+    for i, file in enumerate(files_list, 1):
+        print(f"{i}. {file}")
+    print(f"{len(files_list) + 1}. Upload a new {file_description} file")
+
+    while True:
+        try:
+            choice = int(input(f"Select a {file_description} file number: "))
+            if 1 <= choice <= len(files_list):
+                return files_list[choice - 1]
+            if choice == len(files_list) + 1:
+                uploaded = files.upload()
+                if uploaded:
+                    return list(uploaded.keys())[0]
+                print(f"No {file_description} file was uploaded. Please try again.")
+            else:
+                print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+# 5. Data import and parsing
+def import_data(main_file_path: str, prop_details_file_path: str) -> List[Tuple[Dict[str, Any], pd.DataFrame]]:
+    """Import data from Comps_V2 file and PropDetails file, including JSON in .txt files."""
+    subjects = []
+    
+    # Import main input file
+    if main_file_path.endswith(('.json', '.txt')):
+        with open(main_file_path, 'r') as f:
+            content = f.read()
+        try:
+            data_list = json.loads(content)
+        except json.JSONDecodeError as e:
+            logging.warning(f"Initial JSON parsing failed for Comps_V2 file: {str(e)}")
+            logging.info("Attempting to fix JSON formatting...")
+            fixed_content = attempt_json_fix(content)
+            try:
+                data_list = json.loads(fixed_content)
+                logging.info("Comps_V2 JSON successfully parsed after fixing.")
+            except json.JSONDecodeError as e:
+                logging.error(f"JSON parsing failed even after attempted fix for Comps_V2 file: {str(e)}")
+                logging.info("Printing the problematic section:")
+                error_line = e.lineno
+                start = max(0, error_line - 3)
+                end = error_line + 2
+                problematic_section = fixed_content.split('\n')[start:end]
+                for i, line in enumerate(problematic_section, start=start+1):
+                    logging.error(f"{i}: {line}")
+                logging.error("\nPlease check the Comps_V2 file for formatting issues.")
+                raise
+
+        # Parse main input data
+        for data in data_list:
+            if 'comps' in data and 'input' in data:
+                subject_data = data['input']
+                flattened_data = [flatten_json(comp) for comp in data['comps']]
+                df = pd.DataFrame(flattened_data)
+                subjects.append((subject_data, df))
+            else:
+                logging.warning("Comps_V2 JSON entry does not contain 'comps' and 'input' keys. Skipping this entry.")
+
+    elif main_file_path.endswith('.csv'):
+        df_main = pd.read_csv(main_file_path)
+        # Assuming the CSV has columns 'input' and 'comps' containing JSON strings
+        for _, row in df_main.iterrows():
+            try:
+                subject_data = json.loads(row['input'])
+                comps_data = json.loads(row['comps'])
+                flattened_data = [flatten_json(comp) for comp in comps_data]
+                comps_df = pd.DataFrame(flattened_data)
+                subjects.append((subject_data, comps_df))
+            except Exception as e:
+                logging.error(f"Failed to parse row: {e}")
+    elif main_file_path.endswith(('.xlsx', '.xls')):
+        df_main = pd.read_excel(main_file_path)
+        # Assuming the Excel has columns 'input' and 'comps' containing JSON strings
+        for _, row in df_main.iterrows():
+            try:
+                subject_data = json.loads(row['input'])
+                comps_data = json.loads(row['comps'])
+                flattened_data = [flatten_json(comp) for comp in comps_data]
+                comps_df = pd.DataFrame(flattened_data)
+                subjects.append((subject_data, comps_df))
+            except Exception as e:
+                logging.error(f"Failed to parse row: {e}")
+    else:
+        raise ValueError("Unsupported Comps_V2 file format")
+
+    # Import PropDetails file
+    if prop_details_file_path.endswith('.csv'):
+        delimiter = detect_csv_delimiter(prop_details_file_path)
+        prop_df = pd.read_csv(prop_details_file_path, sep=delimiter)
+        # 4.1 Convert relevant fields to numeric with logging
+        numeric_fields_prop = ['data.propertyInfo.bedrooms', 'data.propertyInfo.bathrooms',
+                               'data.propertyInfo.livingSquareFeet', 'data.propertyInfo.yearBuilt',
+                               'data.propertyInfo.lotSquareFeet', 'data.lotInfo.lotAcres']
+        
+        for field in numeric_fields_prop:
+            if field in prop_df.columns:
+                # Attempt to convert to numeric
+                prop_df[field] = pd.to_numeric(prop_df[field], errors='coerce')
+                # Count how many were set to NaN
+                conversion_failures = prop_df[field].isna().sum()
+                if conversion_failures > 0:
+                    logging.warning(f"{conversion_failures} entries in '{field}' could not be converted and are set to NaN.")
+                # Replace NaN with 0
+                prop_df[field] = prop_df[field].fillna(0)
+            else:
+                logging.warning(f"Field '{field}' not found in PropDetails CSV.")
+        
+        # 4.2 Normalize addresses for mapping
+        prop_df['address_standardized'] = prop_df['data.propertyInfo.address.label'].apply(normalize_address)
+        
+        # Create a dictionary mapping standardized addresses to their detailed info
+        prop_details_dict = prop_df.set_index('address_standardized').to_dict('index')
+    elif prop_details_file_path.endswith(('.xlsx', '.xls')):
+        # For Excel files, assuming similar structure to CSV
+        delimiter = detect_csv_delimiter(prop_details_file_path)  # Not needed for Excel, but kept for consistency
+        prop_df = pd.read_excel(prop_details_file_path)
+        prop_df.columns = [col.strip() for col in prop_df.columns]
+        # 4.3 Convert relevant fields to numeric with logging
+        numeric_fields_prop = ['data.propertyInfo.bedrooms', 'data.propertyInfo.bathrooms',
+                               'data.propertyInfo.livingSquareFeet', 'data.propertyInfo.yearBuilt',
+                               'data.propertyInfo.lotSquareFeet', 'data.lotInfo.lotAcres']
+        
+        for field in numeric_fields_prop:
+            if field in prop_df.columns:
+                # Attempt to convert to numeric
+                prop_df[field] = pd.to_numeric(prop_df[field], errors='coerce')
+                # Count how many were set to NaN
+                conversion_failures = prop_df[field].isna().sum()
+                if conversion_failures > 0:
+                    logging.warning(f"{conversion_failures} entries in '{field}' could not be converted and are set to NaN.")
+                # Replace NaN with 0
+                prop_df[field] = prop_df[field].fillna(0)
+            else:
+                logging.warning(f"Field '{field}' not found in PropDetails Excel.")
+        
+        # 4.4 Normalize addresses for mapping
+        prop_df['address_standardized'] = prop_df['data.propertyInfo.address.label'].apply(normalize_address)
+        
+        # Create a dictionary mapping standardized addresses to their detailed info
+        prop_details_dict = prop_df.set_index('address_standardized').to_dict('index')
+    elif prop_details_file_path.endswith(('.json', '.txt')):
+        with open(prop_details_file_path, 'r') as f:
+            prop_content = f.read()
+        try:
+            prop_data_list = json.loads(prop_content)
+        except json.JSONDecodeError as e:
+            logging.warning(f"Initial JSON parsing failed for PropDetails file: {str(e)}")
+            logging.info("Attempting to fix JSON formatting...")
+            fixed_prop_content = attempt_json_fix(prop_content)
+            try:
+                prop_data_list = json.loads(fixed_prop_content)
+                logging.info("PropDetails JSON successfully parsed after fixing.")
+            except json.JSONDecodeError as e:
+                logging.error(f"JSON parsing failed even after attempted fix for PropDetails file: {str(e)}")
+                logging.info("Printing the problematic section:")
+                error_line = e.lineno
+                start = max(0, error_line - 3)
+                end = error_line + 2
+                problematic_section = fixed_prop_content.split('\n')[start:end]
+                for i, line in enumerate(problematic_section, start=start+1):
+                    logging.error(f"{i}: {line}")
+                logging.error("\nPlease check the PropDetails file for formatting issues.")
+                raise
+
+        # 4.5 Convert relevant fields to numeric with logging and normalize addresses
+        prop_details_dict = {}
+        for entry in prop_data_list:
+            address = entry.get('data.propertyInfo.address.label', '').strip()
+            if address:
+                normalized_address = normalize_address(address)
+                # Extract and convert numeric fields
+                bedrooms = entry.get('data.propertyInfo.bedrooms', 0)
+                bathrooms = entry.get('data.propertyInfo.bathrooms', 0)
+                square_feet = entry.get('data.propertyInfo.livingSquareFeet', 0)
+                year_built = entry.get('data.propertyInfo.yearBuilt', 0)
+                lot_square_feet = entry.get('data.propertyInfo.lotSquareFeet', 0)
+                lot_acres = entry.get('data.lotInfo.lotAcres', 0)
+                
+                # Ensure data types are correct
+                try:
+                    bedrooms = int(bedrooms)
+                except ValueError:
+                    logging.warning(f"Invalid bedrooms value '{bedrooms}' for address '{address}'. Setting to 0.")
+                    bedrooms = 0
+                try:
+                    bathrooms = int(bathrooms)
+                except ValueError:
+                    logging.warning(f"Invalid bathrooms value '{bathrooms}' for address '{address}'. Setting to 0.")
+                    bathrooms = 0
+                try:
+                    square_feet = int(square_feet)
+                except ValueError:
+                    logging.warning(f"Invalid squareFeet value '{square_feet}' for address '{address}'. Setting to 0.")
+                    square_feet = 0
+                try:
+                    year_built = int(year_built)
+                except ValueError:
+                    logging.warning(f"Invalid yearBuilt value '{year_built}' for address '{address}'. Setting to 0.")
+                    year_built = 0
+                try:
+                    lot_square_feet = int(lot_square_feet)
+                except ValueError:
+                    logging.warning(f"Invalid lotSquareFeet value '{lot_square_feet}' for address '{address}'. Setting to 0.")
+                    lot_square_feet = 0
+                try:
+                    lot_acres = float(lot_acres)
+                except ValueError:
+                    logging.warning(f"Invalid lotAcres value '{lot_acres}' for address '{address}'. Setting to 0.")
+                    lot_acres = 0.0
+
+                prop_details_dict[normalized_address] = {
+                    'bedrooms': bedrooms,
+                    'bathrooms': bathrooms,
+                    'squareFeet': square_feet,
+                    'yearBuilt': year_built,
+                    'lotSquareFeet': lot_square_feet,
+                    'lotAcres': lot_acres
+                }
+            else:
+                logging.warning("PropDetails entry missing 'data.propertyInfo.address.label'. Skipping this entry.")
+
+    # Merge PropDetails into subjects
+    merged_subjects = []
+    for subject, comps in subjects:
+        subject_address = normalize_address(subject.get('address', ''))
+        prop_details = prop_details_dict.get(subject_address, {})
+        
+        # Update subject data with PropDetails
+        subject_updated = subject.copy()
+        # Fill in missing fields from PropDetails
+        for field in ['bedrooms', 'bathrooms', 'squareFeet', 'yearBuilt', 'lotSquareFeet', 'lotAcres']:
+            if subject_updated.get(field, 'N/A') in [None, '', 'N/A']:
+                subject_updated[field] = prop_details.get(field, 'N/A')
+        
+        merged_subjects.append((subject_updated, comps))
+
+    # Log unmatched subjects
+    unmatched_subjects = [normalize_address(subject.get('address', 'N/A')) for subject, _ in subjects if normalize_address(subject.get('address', '').strip()) not in prop_details_dict]
+    if unmatched_subjects:
+        logging.warning("The following subjects could not be matched with PropDetails:")
+        for addr in unmatched_subjects:
+            logging.warning(f"- {addr}")
+
+    return merged_subjects
+
+# 6. Comps Retrieval Functions
+# 6.1 Single Comp Retrieval Function
+async def get_comp(session, record: Dict[str, Any], headers, url, semaphore):
+    """Asynchronously retrieve comp for a single property using Address first, then ID if needed."""
+    payload = {}
+    used_method = None
+
+    # Attempt using Address first
+    if 'Address' in record and record['Address']:
+        payload = {"address": record['Address']}
+        used_method = 'Address'
+    elif 'ID' in record and record['ID']:
+        payload = {"id": record['ID']}
+        used_method = 'ID'
+    else:
+        logging.warning("No valid identifier found for the record. Skipping.")
+        return {"error": "No valid identifier found."}
+
+    async with semaphore:
+        async with session.post(url, json=payload, headers=headers) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                error_message = await response.text()
+                logging.error(f"Error fetching comp using {used_method} for {payload}: {response.status} - {error_message}")
+                # If Address was used and ID is available, retry with ID
+                if used_method == 'Address' and 'ID' in record and record['ID']:
+                    logging.info(f"Retrying with ID for record: {record['ID']}")
+                    payload_retry = {"id": record['ID']}
+                    async with session.post(url, json=payload_retry, headers=headers) as retry_response:
+                        if retry_response.status == 200:
+                            return await retry_response.json()
+                        else:
+                            retry_error = await retry_response.text()
+                            logging.error(f"Error fetching comp using ID for {record['ID']}: {retry_response.status} - {retry_error}")
+                            return {"error": f"Failed to retrieve comp for {record['ID']} using both Address and ID."}
+                else:
+                    return {"error": f"Failed to retrieve comp for {payload}."}
+
+# 6.2 Multiple Comps Retrieval Function
+async def get_comps(records: List[Dict[str, Any]]):
+    """Retrieve comps for a list of property records and save the results."""
+    # API setup
+    url = "https://api.realestateapi.com/v2/PropertyComps"
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "x-api-key": "YOUR_API_KEY_HERE"  # Replace with your actual API key or method to retrieve it
+    }
+
+    # Time setup
+    est = pytz.timezone('US/Eastern')
+    current_time = datetime.now(est)
+    formatted_time = current_time.strftime("%m%d%y_%H%M%S")
+
+    # Google Drive mounting
+    mount_drive()
+
+    # Asynchronous API calls with concurrency limit
+    semaphore = asyncio.Semaphore(100)  # Limit to 100 concurrent requests
+    async with aiohttp.ClientSession() as session:
+        tasks = [get_comp(session, record, headers, url, semaphore) for record in records]
+        results = await asyncio.gather(*tasks)
+
+    # Convert results to DataFrame
+    df = pd.DataFrame(results)
+
+    # Save results
+    filename = f"Comps_V2_{formatted_time}.json"
+
+    # Save to Google Colab
+    with open(filename, 'w') as f:
+        json.dump(results, f, indent=2)
+    logging.info(f"File '{filename}' has been saved in Colab.")
+
+    # Try to save to Google Drive if mounted
+    drive_base_path = '/content/drive/MyDrive/'
+    drive_folder = 'REAPI Comps'  # You can adjust this folder name as needed
+
+    # Create the full path, ensuring it exists
+    drive_path = os.path.join(drive_base_path, drive_folder)
+    os.makedirs(drive_path, exist_ok=True)
+
+    if os.path.exists(drive_path):
+        full_path = os.path.join(drive_path, filename)
+        with open(full_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        logging.info(f"File '{filename}' has been saved in Google Drive folder '{drive_folder}'.")
+    else:
+        logging.warning("Unable to save to Google Drive. File saved only in Colab.")
+
+    # Download to user's machine
+    files.download(filename)
+    logging.info(f"File '{filename}' has been downloaded to your machine.")
+
+    return results  # Return results for further processing
+
+# 7. Data cleaning and preprocessing
+def clean_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean and preprocess the data."""
+    df = df.fillna('N/A')  # Ensure missing values are 'N/A'
+    for col in NUMERIC_FIELDS:
+        if col in df.columns:
+            # Attempt to convert to numeric
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            # Count how many were set to NaN
+            conversion_failures = df[col].isna().sum()
+            if conversion_failures > 0:
+                logging.warning(f"{conversion_failures} entries in '{col}' could not be converted and are set to NaN.")
+            # Replace NaN with 0
+            df[col] = df[col].fillna(0)
+        else:
+            logging.warning(f"Numeric field '{col}' not found in comps data.")
+    return df
+
+# 8. Price per square foot calculation
+def calculate_ppsf(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate price per square foot."""
+    df['price_per_sqft'] = df.apply(
+        lambda row: row['lastSaleAmount'] / row['squareFeet'] if row['squareFeet'] > 0 else 0, 
+        axis=1
+    )
+    # Replace any remaining infinite or NaN values
+    df['price_per_sqft'].replace([np.inf, -np.inf], 0, inplace=True)
+    df['price_per_sqft'].fillna(0, inplace=True)
+    return df
+
+# 9. Results formatting
+def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_arv: float, avg_ppsf: float) -> pd.DataFrame:
+    """Format the results into a DataFrame."""
+    # Convert subject data fields using safe_float
+    subject_address = subject_data.get('address', 'N/A')
+    subject_beds = safe_float(subject_data.get('bedrooms', 0))
+    subject_baths = safe_float(subject_data.get('bathrooms', 0))
+    subject_year_built = safe_float(subject_data.get('yearBuilt', 0))
+    subject_sqft = safe_float(subject_data.get('squareFeet', 0))
+    subject_lot_size = safe_float(subject_data.get('lotSquareFeet', 0))
+    subject_lot_acres = safe_float(subject_data.get('lotAcres', 0))
+
+    results = {
+        'subject_address': subject_address,
+        'subject_beds': subject_beds,
+        'subject_baths': subject_baths,
+        'subject_year_built': subject_year_built,
+        'subject_sqft': round(subject_sqft, 2),
+        'subject_lot_size': round(subject_lot_size, 2),
+        'subject_lot_acres': round(subject_lot_acres, 2),
+        'est_arv': round(est_arv, 2),
+        'avg_ppsf': round(avg_ppsf, 2),
+        'num_comps': len(comps_data)
+    }
+
+    # Calculate and add PPSF for each comp
+    for i, comp in comps_data.iterrows():
+        comp_prefix = f'comp_{i+1}_ppsf'
+        ppsf = round(comp['price_per_sqft'], 2)
+        results[comp_prefix] = ppsf
+
+    # Process each comp's details
+    for i, comp in comps_data.iterrows():
+        comp_prefix = f'comp_{i+1}_'
+        # Access the correct address field
+        comp_address = comp.get('data.propertyInfo.address.label', '') or comp.get('address.address', 'N/A')
+        comp_address = normalize_address(comp_address)
+        results[f'{comp_prefix}address'] = comp_address
+
+        # Process numeric fields
+        for field in NUMERIC_FIELDS:
+            value = comp.get(field, 0)
+            converted_value = safe_float(value)
+            results[f'{comp_prefix}{field}'] = round(converted_value, 2)
+
+        # Process non-numeric fields
+        for field in NON_NUMERIC_FIELDS:
+            value = comp.get(field, 'N/A')
+            results[f'{comp_prefix}{field}'] = value if value != 'N/A' else ''
+
+        # Distance in miles
+        distance = safe_float(comp.get('distance_from_subject', 0))
+        results[f'{comp_prefix}distance_miles'] = round(distance, 2)
+
+    return pd.DataFrame([results])
+
+# 10. Save results
+def save_results(df: pd.DataFrame) -> None:
+    """Save results to CSV in both Colab and Google Drive, and download to local machine."""
+    timestamp = datetime.now().strftime("%m%d%y_%H%M%S")
+    filename = f"REAPI_Comps_{timestamp}.csv"
+
+    # Ensure output directories exist
+    os.makedirs(COLAB_OUTPUT_FOLDER, exist_ok=True)
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+    # Save to Colab
+    colab_path = os.path.join(COLAB_OUTPUT_FOLDER, filename)
+    df.to_csv(colab_path, index=False)
+    logging.info(f"Results saved in Colab as {colab_path}")
+
+    # Save to Google Drive
+    drive_path = os.path.join(OUTPUT_FOLDER, filename)
+    df.to_csv(drive_path, index=False)
+    logging.info(f"Results saved to Google Drive as {drive_path}")
+
+    # Download to local machine
+    files.download(colab_path)
+    logging.info(f"Results downloaded to your local machine as {filename}")
+    logging.info("Please check your browser's download folder for the file.")
+
+# 11. Process a single subject
+def process_subject(subject_data: Dict[str, Any], comps_df: pd.DataFrame) -> pd.DataFrame:
+    """Process a single subject property and its comps."""
+    try:
+        logging.info(f"Processing subject at {subject_data.get('address', 'N/A')}")
+        # Clean and preprocess comps data
+        df = clean_data(comps_df)
+        df = calculate_ppsf(df)
+
+        # Ensure subject_sqft is valid
+        subject_sqft = subject_data.get('squareFeet', 0)
+        if isinstance(subject_sqft, str):
+            subject_sqft = subject_sqft.replace(',', '').strip()
+        subject_sqft = safe_float(subject_sqft)
+
+        # Update the subject_data with the cleaned squareFeet
+        subject_data['squareFeet'] = subject_sqft
+
+        # Convert other subject numeric fields
+        for field in ['bedrooms', 'bathrooms', 'yearBuilt', 'lotSquareFeet', 'lotAcres']:
+            value = subject_data.get(field, 0)
+            if isinstance(value, str):
+                value = value.replace(',', '').strip()
+            try:
+                subject_data[field] = float(value)
+            except ValueError:
+                logging.warning(f"Invalid {field} '{value}' for subject at {subject_data.get('address', 'N/A')}. Setting to 0.")
+                subject_data[field] = 0.0
+
+        # Calculate initial average PPSF and ARV
+        initial_avg_ppsf = df['price_per_sqft'].mean()
+        initial_est_arv = initial_avg_ppsf * subject_sqft if subject_sqft else 0
+
+        # Calculate adjusted ARV
+        adjusted_arv, adjusted_avg_ppsf = calculate_adjusted_arv(df, subject_sqft)
+
+        # Calculate distance from subject for each comp
+        subject_lat = subject_data.get('latitude', 0)
+        subject_lon = subject_data.get('longitude', 0)
+        try:
+            subject_lat = float(subject_lat)
+            subject_lon = float(subject_lon)
+        except ValueError:
+            logging.warning(f"Invalid latitude or longitude for subject at {subject_data.get('address', 'N/A')}. Setting to 0.")
+            subject_lat = 0.0
+            subject_lon = 0.0
+
+        df['distance_from_subject'] = df.apply(
+            lambda row: calculate_distance(
+                subject_lat, subject_lon, 
+                float(row['latitude']) if row['latitude'] != 'N/A' else 0.0, 
+                float(row['longitude']) if row['longitude'] != 'N/A' else 0.0
+            ), 
+            axis=1
+        )
+
+        # Format results
+        results_df = format_results(subject_data, df, adjusted_arv, adjusted_avg_ppsf)
+
+        logging.info(f"Processed subject at {subject_data.get('address', 'N/A')}")
+        logging.info(f"Adjusted Estimated ARV: ${adjusted_arv:.2f}")
+        logging.info(f"Adjusted Average Price per Square Foot: ${adjusted_avg_ppsf:.2f}")
+        logging.info("-" * 50)
+
+        return results_df
+
+    except Exception as e:
+        logging.error(f"An error occurred while processing subject at {subject_data.get('address', 'N/A')}: {str(e)}")
+        traceback.print_exc()
+        return pd.DataFrame()  # Return empty DataFrame on error
+
+# 12. Main execution function
+def main():
+    """Main execution function."""
+    try:
+        # 12.1 Select and upload the main input file
+        main_file_path = select_file("Comps_V2")
+        logging.info(f"Selected Comps_V2 file: {main_file_path}")
+
+        # 12.2 Select and upload the PropDetails file
+        prop_details_file_path = select_file("PropDetails")
+        logging.info(f"Selected PropDetails file: {prop_details_file_path}")
+
+        # 12.3 Import and merge data
+        subjects = import_data(main_file_path, prop_details_file_path)
+
+        if not subjects:
+            logging.warning("No valid subjects found. Exiting.")
+            return
+
+        # 12.4 Prepare records for API calls
+        records = [{'Address': subject['address'], 'ID': subject.get('data.id', '')} for subject, _ in subjects]
+        
+        # 12.5 Retrieve comps data
+        comps_results = asyncio.run(get_comps(records))
+
+        # 12.6 Convert comps_results to DataFrame
+        comps_df = pd.DataFrame(comps_results)
+
+        # 12.7 Perform analysis
+        all_results = []
+        for subject, comps in subjects:
+            result = process_subject(subject, comps)
+            if not result.empty:
+                all_results.append(result)
+
+        # 12.8 Save combined results
+        if all_results:
+            combined_df = pd.concat(all_results, ignore_index=True)
+            save_results(combined_df)
+            logging.info(f"Processed {len(all_results)} subject properties.")
+        else:
+            logging.warning("No results to save.")
+
+    except Exception as e:
+        logging.error(f"An error occurred: {str(e)}")
+        traceback.print_exc()
+
+# 13. Main Execution
+if __name__ == "__main__":
+    main()
