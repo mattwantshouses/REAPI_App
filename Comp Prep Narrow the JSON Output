@@ -1,4 +1,4 @@
-# Comp Prep
+# Comp Prep - Narrow the JSON Output To Become the next Input
 # Version: 1.0
 # Future iterations - add recursively flattening the JSON to csv
 
@@ -83,6 +83,8 @@ def main():
         "data.propertyInfo.yearBuilt",
         "data.propertyInfo.lotSquareFeet",
         "data.lotInfo.lotAcres",
+        "data.propertyInfo.latitude",
+        "data.propertyInfo.longitude",
         "data.mlsHistory.0.status",
         "data.mlsHistory.0.lastStatusDate",
         "data.mlsHistory.0.price",
