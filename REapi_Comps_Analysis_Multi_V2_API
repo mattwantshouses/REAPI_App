@@ -1,11 +1,11 @@
-# Script Name: REapi Comps Analysis
-# Version: 3.135 (Fixed squareFeet Mapping for CSV PropDetails)
+# Script Name: REapi Comps Analysis Multi V2 API
+# Version: 3.136 (Added ARV Range Calculation)
 # Created: 09-13-24
-# Updated: 04-28-24
+# Updated: 09-18-24
 # Purpose:
 # - Import multiple subject properties with multiple comps each.
 # - Append missing Subject Property details from PropDetails file.
-# - Calculate price per square foot and ARV.
+# - Calculate price per square foot and ARV range.
 # - Handle missing or invalid data gracefully.
 
 # 1. Import required libraries
@@ -81,35 +81,40 @@ def attempt_json_fix(json_string: str) -> str:
     json_string = re.sub(r'"\s*\n\s*"', '",\n"', json_string)
     return json_string
 
-# 3.3 Remove PPSF outliers
+# 3.3 Remove PPSF outliers (Modified)
 def calculate_adjusted_arv(comps_data: pd.DataFrame, subject_sqft: float, outlier_percent: float = 0.15, top_percent: float = 0.30) -> tuple:
     """
     Calculate adjusted ARV focusing on top 30% of comps after removing top 15% outliers.
-    
+    Additionally, create a conservative ARV range within ±10% of the adjusted ARV.
+
     :param comps_data: DataFrame containing the comp data with 'price_per_sqft' column
     :param subject_sqft: Square footage of the subject property
     :param outlier_percent: Percentage of top values to remove as outliers (default 15%)
     :param top_percent: Percentage of top remaining values to focus on (default 30%)
-    :return: Tuple of (adjusted ARV, adjusted average PPSF)
+    :return: Tuple of (adjusted ARV low, adjusted ARV high, adjusted average PPSF)
     """
     # Sort PPSF in descending order
     sorted_ppsf = sorted(comps_data['price_per_sqft'], reverse=True)
-    
+
     # Remove top 15% as outliers
     outlier_cutoff = int(len(sorted_ppsf) * outlier_percent)
     filtered_ppsf = sorted_ppsf[outlier_cutoff:]
-    
+
     # Focus on top 30% of remaining data
     top_cutoff = int(len(filtered_ppsf) * top_percent)
     selected_ppsf = filtered_ppsf[:top_cutoff]
-    
+
     # Calculate average PPSF from selected range
     avg_ppsf = np.mean(selected_ppsf) if selected_ppsf else 0
-    
+
     # Calculate adjusted ARV
     adjusted_arv = avg_ppsf * subject_sqft if subject_sqft else 0
-    
-    return adjusted_arv, avg_ppsf
+
+    # Create ARV range with ±10%
+    arv_low = adjusted_arv * 0.90  # 10% below
+    arv_high = adjusted_arv * 1.10  # 10% above
+
+    return arv_low, arv_high, avg_ppsf
 
 # 4. Main functions
 
@@ -141,7 +146,7 @@ def select_file(file_description: str) -> str:
 def import_data(main_file_path: str, prop_details_file_path: str) -> List[Tuple[Dict[str, Any], pd.DataFrame]]:
     """Import data from Comps_V2 file and PropDetails file, including JSON in .txt files."""
     subjects = []
-    
+
     # Import main input file
     if main_file_path.endswith(('.json', '.txt')):
         with open(main_file_path, 'r') as f:
@@ -273,7 +278,7 @@ def import_data(main_file_path: str, prop_details_file_path: str) -> List[Tuple[
     for subject, comps in subjects:
         subject_address = subject.get('address', '').strip().lower()
         prop_details = prop_details_dict.get(subject_address, {})
-        
+
         # Update subject data with PropDetails
         subject_updated = subject.copy()
         # Fill in missing fields from PropDetails
@@ -289,7 +294,7 @@ def import_data(main_file_path: str, prop_details_file_path: str) -> List[Tuple[
             subject_updated['lotSquareFeet'] = prop_details.get('lotSquareFeet', 'N/A')
         # Add 'lotAcres' as a new field
         subject_updated['lotAcres'] = prop_details.get('lotAcres', 'N/A')
-        
+
         merged_subjects.append((subject_updated, comps))
 
     # Log unmatched subjects
@@ -306,7 +311,7 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     """Clean and preprocess the data."""
     df = df.fillna('N/A')  # Ensure missing values are 'N/A'
     numeric_columns = [col for col in df.columns if any(field in col for field in [
-        'bedrooms', 'bathrooms', 'yearBuilt', 'squareFeet', 'lotSquareFeet', 
+        'bedrooms', 'bathrooms', 'yearBuilt', 'squareFeet', 'lotSquareFeet',
         'lastSaleAmount', 'latitude', 'longitude'
     ])]
     for col in numeric_columns:
@@ -338,8 +343,8 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
 
     return distance
 
-# 4.6 Results formatting
-def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_arv: float, avg_ppsf: float) -> pd.DataFrame:
+# 4.6 Results formatting (Modified)
+def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_arv_low: float, est_arv_high: float, avg_ppsf: float) -> pd.DataFrame:
     """Format the results into a DataFrame."""
     # Helper function to safely convert values to float
     def safe_float(value, default=0.0):
@@ -365,7 +370,8 @@ def format_results(subject_data: Dict[str, Any], comps_data: pd.DataFrame, est_a
         'subject_sqft': round(subject_sqft, 2),
         'subject_lot_size': round(subject_lot_size, 2),
         'subject_lot_acres': round(subject_lot_acres, 2),
-        'est_arv': round(est_arv, 2),
+        'est_arv_low': round(est_arv_low, 2),
+        'est_arv_high': round(est_arv_high, 2),
         'avg_ppsf': round(avg_ppsf, 2),
         'num_comps': len(comps_data)
     }
@@ -427,7 +433,7 @@ def save_results(df: pd.DataFrame) -> None:
     logging.info(f"Results downloaded to your local machine as {filename}")
     logging.info("Please check your browser's download folder for the file.")
 
-# 4.8 Process a single subject
+# 4.8 Process a single subject (Modified)
 def process_subject(subject_data: Dict[str, Any], comps_df: pd.DataFrame) -> pd.DataFrame:
     """Process a single subject property and its comps."""
     try:
@@ -453,8 +459,8 @@ def process_subject(subject_data: Dict[str, Any], comps_df: pd.DataFrame) -> pd.
         initial_avg_ppsf = df['price_per_sqft'].mean()
         initial_est_arv = initial_avg_ppsf * subject_sqft if subject_sqft else 0
 
-        # Calculate adjusted ARV
-        adjusted_arv, adjusted_avg_ppsf = calculate_adjusted_arv(df, subject_sqft)
+        # Calculate adjusted ARV range
+        adjusted_arv_low, adjusted_arv_high, adjusted_avg_ppsf = calculate_adjusted_arv(df, subject_sqft)
 
         # Calculate distance from subject for each comp
         subject_lat = subject_data.get('latitude', 0)
@@ -469,18 +475,18 @@ def process_subject(subject_data: Dict[str, Any], comps_df: pd.DataFrame) -> pd.
 
         df['distance_from_subject'] = df.apply(
             lambda row: calculate_distance(
-                subject_lat, subject_lon, 
-                float(row['latitude']) if row['latitude'] != 'N/A' else 0.0, 
+                subject_lat, subject_lon,
+                float(row['latitude']) if row['latitude'] != 'N/A' else 0.0,
                 float(row['longitude']) if row['longitude'] != 'N/A' else 0.0
-            ), 
+            ),
             axis=1
         )
 
-        # Format results
-        results_df = format_results(subject_data, df, adjusted_arv, adjusted_avg_ppsf)
+        # Format results with ARV range
+        results_df = format_results(subject_data, df, adjusted_arv_low, adjusted_arv_high, adjusted_avg_ppsf)
 
         logging.info(f"Processed subject at {subject_data.get('address', 'N/A')}")
-        logging.info(f"Adjusted Estimated ARV: ${adjusted_arv:.2f}")
+        logging.info(f"Adjusted Estimated ARV Range: ${adjusted_arv_low:.2f} - ${adjusted_arv_high:.2f}")
         logging.info(f"Adjusted Average Price per Square Foot: ${adjusted_avg_ppsf:.2f}")
         logging.info("-" * 50)
 
