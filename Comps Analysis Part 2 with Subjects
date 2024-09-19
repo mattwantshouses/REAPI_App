@@ -1,0 +1,439 @@
+# Script Name: REapi Comps Analysis Part 2 with Subjects 
+# Version: 4.5
+# Created: 09-19-24
+# Updated: 09-21-24
+# Purpose:
+# - Combine details from PropDetails CSV into REAPI Comps Analysis.
+# - Recalculate ARV, distance from subject, and other relevant metrics.
+# - Output the results with a filename that includes the number of subjects and the current date and time.
+# - Update file upload hints in the Colab notebook to specify "PropDetails" and "REAPI_Comps_Analysis".
+
+# 1. Import required libraries
+import os
+from datetime import datetime
+from math import radians, sin, cos, sqrt, atan2
+from typing import Tuple
+
+import pandas as pd
+import numpy as np
+from tqdm import tqdm
+from google.colab import files
+import logging
+
+# 2. Constants
+OUTPUT_FOLDER = '/content/drive/MyDrive/REapi_Comps_Results'
+COLAB_OUTPUT_FOLDER = '/content/REapi_Comps_Results'
+
+# Define numeric and non-numeric fields for comps
+NUMERIC_FIELDS = [
+    'subject_beds', 'subject_baths', 'subject_year_built', 'subject_sqft', 'subject_lot_size',
+    'subject_latitude', 'subject_longitude', 'subject_lot_acres',
+    # Comp fields...
+    'comp_1_bedrooms', 'comp_1_bathrooms', 'comp_1_yearBuilt',
+    'comp_1_squareFeet', 'comp_1_lotSquareFeet', 'comp_1_lastSaleAmount',
+    'comp_1_estimatedValue', 'comp_1_latitude', 'comp_1_longitude',
+    # Continue for comps 2 to 10...
+    'comp_10_bedrooms', 'comp_10_bathrooms', 'comp_10_yearBuilt',
+    'comp_10_squareFeet', 'comp_10_lotSquareFeet', 'comp_10_lastSaleAmount',
+    'comp_10_estimatedValue', 'comp_10_latitude', 'comp_10_longitude'
+]
+
+NON_NUMERIC_FIELDS = [
+    'comp_1_lastSaleDate', 'comp_2_lastSaleDate',
+    # Continue for comps 3 to 10...
+    'comp_10_lastSaleDate'
+]
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+# 3. Helper functions
+
+# 3.1 Calculate distance between two coordinates
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate the distance between two points on Earth in miles."""
+    radius = 3959  # Earth's radius in miles
+
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1-a))
+    distance = radius * c
+
+    return distance
+
+# 3.2 Calculate adjusted ARV
+def calculate_adjusted_arv(comps_data: pd.DataFrame, subject_sqft: float, outlier_percent: float = 0.15, top_percent: float = 0.30) -> Tuple[float, float, float]:
+    """
+    Calculate adjusted ARV focusing on top 30% of comps after removing top 15% outliers.
+    Additionally, create a conservative ARV range within ±10% of the adjusted ARV.
+
+    :param comps_data: DataFrame containing the comp data with 'price_per_sqft' column
+    :param subject_sqft: Square footage of the subject property
+    :param outlier_percent: Percentage of top values to remove as outliers (default 15%)
+    :param top_percent: Percentage of top remaining values to focus on (default 30%)
+    :return: Tuple of (adjusted ARV low, adjusted ARV high, adjusted average PPSF)
+    """
+    # Sort PPSF in descending order
+    sorted_ppsf = sorted(comps_data['price_per_sqft'], reverse=True)
+
+    # Remove top 15% as outliers
+    outlier_cutoff = int(len(sorted_ppsf) * outlier_percent)
+    filtered_ppsf = sorted_ppsf[outlier_cutoff:]
+
+    # Focus on top 30% of remaining data
+    top_cutoff = int(len(filtered_ppsf) * top_percent)
+    selected_ppsf = filtered_ppsf[:top_cutoff]
+
+    # Calculate average PPSF from selected range
+    avg_ppsf = np.mean(selected_ppsf) if selected_ppsf else 0
+
+    # Calculate adjusted ARV
+    adjusted_arv = avg_ppsf * subject_sqft if subject_sqft else 0
+
+    # Create ARV range with ±10%
+    arv_low = adjusted_arv * 0.90  # 10% below
+    arv_high = adjusted_arv * 1.10  # 10% above
+
+    return arv_low, arv_high, avg_ppsf
+
+# 3.3 Count Subjects
+def count_subjects(subjects: pd.DataFrame) -> int:
+    """Count the number of subject properties."""
+    return subjects.shape[0]
+
+# 4. Main functions
+
+# 4.1 File selection
+def select_file(file_description: str) -> str:
+    """List files and allow user to select or upload a CSV file.
+
+    Updated hints to specify 'PropDetails' and 'REAPI_Comps_Analysis'.
+    """
+    files_list = [f for f in os.listdir() if f.endswith('.csv')]
+    print(f"Available {file_description} CSV files:")
+    for i, file in enumerate(files_list, 1):
+        print(f"{i}. {file}")
+    print(f"{len(files_list) + 1}. Upload a new {file_description} CSV file")
+
+    while True:
+        try:
+            choice = int(input(f"Select a {file_description} CSV file number: "))
+            if 1 <= choice <= len(files_list):
+                return files_list[choice - 1]
+            if choice == len(files_list) + 1:
+                uploaded = files.upload()
+                if uploaded:
+                    return list(uploaded.keys())[0]
+                print(f"No {file_description} file was uploaded. Please try again.")
+            else:
+                print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+# 4.2 Data import and merging
+def import_and_merge_data(comps_file: str, prop_details_file: str) -> pd.DataFrame:
+    """Import REAPI_Comps_Analysis and PropDetails CSV files and merge subject details."""
+    try:
+        # Import REAPI_Comps_Analysis CSV
+        comps_df = pd.read_csv(comps_file)
+        logging.info(f"Imported REAPI_Comps_Analysis file: {comps_file}")
+    except FileNotFoundError:
+        logging.error(f"REAPI_Comps_Analysis file '{comps_file}' not found.")
+        raise
+    except pd.errors.EmptyDataError:
+        logging.error(f"REAPI_Comps_Analysis file '{comps_file}' is empty.")
+        raise
+    except Exception as e:
+        logging.error(f"Error reading REAPI_Comps_Analysis file: {e}")
+        raise
+
+    try:
+        # Import PropDetails CSV
+        prop_df = pd.read_csv(prop_details_file)
+        logging.info(f"Imported PropDetails file: {prop_details_file}")
+    except FileNotFoundError:
+        logging.error(f"PropDetails file '{prop_details_file}' not found.")
+        raise
+    except pd.errors.EmptyDataError:
+        logging.error(f"PropDetails file '{prop_details_file}' is empty.")
+        raise
+    except Exception as e:
+        logging.error(f"Error reading PropDetails file: {e}")
+        raise
+
+    # Standardize address formatting for merging
+    if 'subject_address' not in comps_df.columns:
+        logging.error("'subject_address' column not found in REAPI_Comps_Analysis.")
+        raise KeyError("'subject_address' column not found in REAPI_Comps_Analysis.")
+
+    if 'data.propertyInfo.address.label' not in prop_df.columns:
+        logging.error("'data.propertyInfo.address.label' column not found in PropDetails.")
+        raise KeyError("'data.propertyInfo.address.label' column not found in PropDetails.")
+
+    comps_df['subject_address_standardized'] = comps_df['subject_address'].astype(str).str.strip().str.lower()
+    prop_df['address_standardized'] = prop_df['data.propertyInfo.address.label'].astype(str).str.strip().str.lower()
+
+    # Create a dictionary mapping standardized addresses to their detailed info
+    prop_details_dict = prop_df.set_index('address_standardized').to_dict('index')
+
+    # Define the mapping between PropDetails fields and REAPI_Comps_Analysis fields
+    field_mappings = {
+        'data.propertyInfo.bedrooms': 'subject_beds',
+        'data.propertyInfo.bathrooms': 'subject_baths',
+        'data.propertyInfo.livingSquareFeet': 'subject_sqft',
+        'data.propertyInfo.yearBuilt': 'subject_year_built',
+        'data.propertyInfo.lotSquareFeet': 'subject_lot_size',
+        'data.lotInfo.lotAcres': 'subject_lot_acres',
+        'data.propertyInfo.latitude': 'subject_latitude',
+        'data.propertyInfo.longitude': 'subject_longitude'
+    }
+
+                    
+    # Merge PropDetails into REAPI_Comps_Analysis
+    for prop_field, comps_field in field_mappings.items():
+        if prop_field not in prop_df.columns:
+            logging.warning(f"'{prop_field}' column not found in PropDetails. Filling '{comps_field}' with existing values.")
+            continue  # Skip if the prop_field is not present
+        comps_df[comps_field] = comps_df.apply(
+            lambda row: prop_details_dict.get(row['subject_address_standardized'], {}).get(prop_field, row.get(comps_field, 'N/A')),
+            axis=1
+        )
+
+
+    # Drop the standardized address column
+    comps_df.drop(columns=['subject_address_standardized'], inplace=True, errors='ignore')
+
+    # Log unmatched subjects using the corrected line
+    unmatched_subjects = comps_df[~comps_df['subject_address'].str.strip().str.lower().isin(prop_details_dict)]['subject_address'].tolist()
+    if unmatched_subjects:
+        logging.warning("The following subjects could not be matched with PropDetails:")
+        for addr in unmatched_subjects:
+            logging.warning(f"- {addr}")
+
+    return comps_df
+
+# Ensure standardized address columns exist
+    if 'subject_address' not in comps_df.columns:
+        logging.error("'subject_address' column not found in REAPI_Comps_Analysis.")
+        raise KeyError("'subject_address' column not found in REAPI_Comps_Analysis.")
+
+    if 'data.propertyInfo.address.label' not in prop_df.columns:
+        logging.error("'data.propertyInfo.address.label' column not found in PropDetails.")
+        raise KeyError("'data.propertyInfo.address.label' column not found in PropDetails.")
+
+
+# 4.3 Data cleaning and preprocessing
+def clean_data(comps_df: pd.DataFrame) -> pd.DataFrame:
+    """Clean and preprocess the data."""
+    # Fill missing numeric values with 0
+    for field in NUMERIC_FIELDS:
+        if field in comps_df.columns:
+            comps_df[field] = pd.to_numeric(comps_df[field], errors='coerce').fillna(0)
+        else:
+            logging.warning(f"Numeric field '{field}' not found in REAPI_Comps_Analysis. Filling with 0.")
+            comps_df[field] = 0
+
+    # Fill missing non-numeric values with empty string
+    for field in NON_NUMERIC_FIELDS:
+        if field in comps_df.columns:
+            comps_df[field] = comps_df[field].fillna('')
+        else:
+            logging.warning(f"Non-numeric field '{field}' not found in REAPI_Comps_Analysis. Filling with empty string.")
+            comps_df[field] = ''
+
+    return comps_df
+
+# 4.4 Price per square foot calculation
+def calculate_ppsf(comps_df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate price per square foot for comps."""
+    for i in range(1, 11):
+        sale_amount_col = f'comp_{i}_lastSaleAmount'
+        sqft_col = f'comp_{i}_squareFeet'
+        ppsf_col = f'comp_{i}_ppsf'
+
+        if sale_amount_col not in comps_df.columns or sqft_col not in comps_df.columns:
+            logging.warning(f"Columns '{sale_amount_col}' or '{sqft_col}' not found in REAPI_Comps_Analysis. Filling '{ppsf_col}' with 0.")
+            comps_df[ppsf_col] = 0
+            continue
+
+        comps_df[ppsf_col] = comps_df.apply(
+            lambda row: row[sale_amount_col] / row[sqft_col] if row[sqft_col] > 0 else 0,
+            axis=1
+        ).replace([np.inf, -np.inf], 0).fillna(0)
+
+    return comps_df
+
+# 4.5 Distance calculation
+def calculate_distances(comps_df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate distance from subject property for each comp."""
+    for i in range(1, 11):
+        lat_col = f'comp_{i}_latitude'
+        lon_col = f'comp_{i}_longitude'
+        distance_col = f'comp_{i}_distance_miles'
+
+        if lat_col not in comps_df.columns or lon_col not in comps_df.columns:
+            logging.warning(f"Columns '{lat_col}' or '{lon_col}' not found in REAPI_Comps_Analysis. Filling '{distance_col}' with 0.")
+            comps_df[distance_col] = 0
+            continue
+
+        comps_df[distance_col] = comps_df.apply(
+            lambda row: calculate_distance(
+                row['subject_latitude'], row['subject_longitude'],
+                row[lat_col], row[lon_col]
+            ) if (row['subject_latitude'] and row['subject_longitude'] and row[lat_col] and row[lon_col]) else 0,
+            axis=1
+        ).round(2)
+
+    return comps_df
+
+
+    return comps_df
+
+# 4.6 Recalculate ARV
+def recalculate_arv(comps_df: pd.DataFrame, num_subjects: int) -> pd.DataFrame:
+    """Recalculate ARV for each subject."""
+    # Calculate price per square foot for comps
+    comps_df = calculate_ppsf(comps_df)
+
+    # Iterate through each subject to calculate ARV
+    for index, row in tqdm(comps_df.iterrows(), total=comps_df.shape[0], desc="Recalculating ARV"):
+        # Extract comp PPSFs
+        ppsf_cols = [f'comp_{i}_ppsf' for i in range(1, 11)]
+        comps_ppsf = row[ppsf_cols].values
+
+        # Remove zeros and sort descending
+        comps_ppsf = sorted([ppsf for ppsf in comps_ppsf if ppsf > 0], reverse=True)
+
+        if len(comps_ppsf) == 0:
+            avg_ppsf = 0
+        else:
+            # Remove top 15% as outliers
+            outlier_cutoff = int(len(comps_ppsf) * 0.15)
+            filtered_ppsf = comps_ppsf[outlier_cutoff:]
+
+            # Focus on top 30% of remaining data
+            top_cutoff = int(len(filtered_ppsf) * 0.30)
+            selected_ppsf = filtered_ppsf[:top_cutoff]
+
+            # Calculate average PPSF
+            avg_ppsf = np.mean(selected_ppsf) if len(selected_ppsf) > 0 else 0
+
+        # Calculate ARV
+        subject_sqft = row['subject_sqft']
+        adjusted_arv = avg_ppsf * subject_sqft
+
+        # Create ARV range ±10%
+        arv_low = adjusted_arv * 0.90
+        arv_high = adjusted_arv * 1.10
+
+        # Update the dataframe
+        comps_df.at[index, 'est_arv_low'] = round(arv_low, 2)
+        comps_df.at[index, 'est_arv_high'] = round(arv_high, 2)
+        comps_df.at[index, 'avg_ppsf'] = round(avg_ppsf, 2)
+
+    return comps_df
+
+# 4.7 Results saving (Fixed Syntax)
+def save_results(comps_df: pd.DataFrame, num_subjects: int) -> None:
+    """Save results to CSV in both Colab and Google Drive, and download to local machine."""
+    try:
+        timestamp = datetime.now().strftime("%m%d%y_%H%M%S")
+        filename = f"Comps_Analysis_w_Subject_{num_subjects}_{timestamp}.csv"
+
+        # Define the desired column order
+        desired_order = [
+            'subject_address', 'subject_beds', 'subject_baths', 'subject_year_built',
+            'subject_sqft', 'subject_lot_size', 'subject_latitude', 'subject_longitude', 'subject_lot_acres',
+            'est_arv_low', 'est_arv_high', 'avg_ppsf', 'num_comps'
+            # Add comp fields as needed...
+        ]
+
+        # Reorder columns if they exist
+        existing_columns = [col for col in desired_order if col in comps_df.columns]
+        comps_df = comps_df[existing_columns + [col for col in comps_df.columns if col not in existing_columns]]
+
+        # Ensure output directories exist
+        os.makedirs(COLAB_OUTPUT_FOLDER, exist_ok=True)
+        os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+        # Save to Colab
+        colab_path = os.path.join(COLAB_OUTPUT_FOLDER, filename)
+        comps_df.to_csv(colab_path, index=False)
+        logging.info(f"Results saved in Colab as {colab_path}")
+
+        # Save to Google Drive
+        drive_path = os.path.join(OUTPUT_FOLDER, filename)
+        comps_df.to_csv(drive_path, index=False)
+        logging.info(f"Results saved to Google Drive as {drive_path}")
+
+        # Download to local machine
+        files.download(colab_path)
+        logging.info(f"Results downloaded to your local machine as {filename}")
+        logging.info("Please check your browser's download folder for the file.")
+    except Exception as e:
+        logging.error(f"Failed to save results: {e}")
+        raise
+
+# 4.8 Process all subjects
+def process_subjects(comps_df: pd.DataFrame, num_subjects: int) -> pd.DataFrame:
+    """Process all subject properties and recalculate metrics."""
+    try:
+        # Clean and preprocess data
+        comps_df = clean_data(comps_df)
+
+        # Recalculate ARV
+        comps_df = recalculate_arv(comps_df, num_subjects)
+
+        # Calculate distances
+        comps_df = calculate_distances(comps_df)
+
+        return comps_df
+    except Exception as e:
+        logging.error(f"Error during processing subjects: {e}")
+        raise
+
+# 5. Main execution function
+def main():
+    """Main execution function."""
+    try:
+        # Select and upload the REAPI_Comps_Analysis input CSV file
+        comps_file = select_file("REAPI_Comps_Analysis")
+        logging.info(f"Selected REAPI_Comps_Analysis file: {comps_file}")
+
+        # Select and upload the PropDetails CSV file
+        prop_details_file = select_file("PropDetails")
+        logging.info(f"Selected PropDetails file: {prop_details_file}")
+
+        # Import and merge data
+        comps_df = import_and_merge_data(comps_file, prop_details_file)
+
+        if comps_df.empty:
+            logging.warning("No valid subjects found after merging. Exiting.")
+            return
+
+        # Count the number of subjects
+        num_subjects = count_subjects(comps_df)
+        logging.info(f"Number of subjects to process: {num_subjects}")
+
+        # Process all subjects
+        comps_df = process_subjects(comps_df, num_subjects)
+
+        # Save the results
+        save_results(comps_df, num_subjects)
+        logging.info(f"Processed {num_subjects} subject properties.")
+
+    except KeyError as ke:
+        logging.error(f"Key error: {ke}")
+    except FileNotFoundError as fnf:
+        logging.error(f"File not found error: {fnf}")
+    except pd.errors.EmptyDataError as ede:
+        logging.error(f"Pandas empty data error: {ede}")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {e}")
+        raise
+
+if __name__ == "__main__":
+    main()
