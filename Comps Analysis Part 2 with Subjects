@@ -1,12 +1,13 @@
 # Script Name: REapi Comps Analysis Part 2 with Subjects 
-# Version: 4.5
+# Version: 4.8
 # Created: 09-19-24
-# Updated: 09-21-24
+# Updated: 09-24-24
 # Purpose:
 # - Combine details from PropDetails CSV into REAPI Comps Analysis.
 # - Recalculate ARV, distance from subject, and other relevant metrics.
 # - Output the results with a filename that includes the number of subjects and the current date and time.
 # - Update file upload hints in the Colab notebook to specify "PropDetails" and "REAPI_Comps_Analysis".
+# - Handle Google Drive mounting errors gracefully.
 
 # 1. Import required libraries
 import os
@@ -18,10 +19,13 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 from google.colab import files
+from google.colab import drive  # Added for Google Drive mounting
 import logging
 
 # 2. Constants
-OUTPUT_FOLDER = '/content/drive/MyDrive/REapi_Comps_Results'
+FOLDER_ID = 'your_google_drive_folder_id_here'  # Replace with your Google Drive folder ID if needed
+FOLDER_NAME = 'REapi_Comps_Results'  # Name of the Google Drive folder
+OUTPUT_FOLDER = f'/content/drive/MyDrive/{FOLDER_NAME}'  # Updated to include folder name
 COLAB_OUTPUT_FOLDER = '/content/REapi_Comps_Results'
 
 # Define numeric and non-numeric fields for comps
@@ -206,7 +210,7 @@ def import_and_merge_data(comps_file: str, prop_details_file: str) -> pd.DataFra
     # Drop the standardized address column
     comps_df.drop(columns=['subject_address_standardized'], inplace=True, errors='ignore')
 
-    # Log unmatched subjects using the corrected line
+    # Log unmatched subjects
     unmatched_subjects = comps_df[~comps_df['subject_address'].str.strip().str.lower().isin(prop_details_dict)]['subject_address'].tolist()
     if unmatched_subjects:
         logging.warning("The following subjects could not be matched with PropDetails:")
@@ -214,16 +218,6 @@ def import_and_merge_data(comps_file: str, prop_details_file: str) -> pd.DataFra
             logging.warning(f"- {addr}")
 
     return comps_df
-
-# Ensure standardized address columns exist
-    if 'subject_address' not in comps_df.columns:
-        logging.error("'subject_address' column not found in REAPI_Comps_Analysis.")
-        raise KeyError("'subject_address' column not found in REAPI_Comps_Analysis.")
-
-    if 'data.propertyInfo.address.label' not in prop_df.columns:
-        logging.error("'data.propertyInfo.address.label' column not found in PropDetails.")
-        raise KeyError("'data.propertyInfo.address.label' column not found in PropDetails.")
-
 
 # 4.3 Data cleaning and preprocessing
 def clean_data(comps_df: pd.DataFrame) -> pd.DataFrame:
@@ -289,9 +283,6 @@ def calculate_distances(comps_df: pd.DataFrame) -> pd.DataFrame:
 
     return comps_df
 
-
-    return comps_df
-
 # 4.6 Recalculate ARV
 def recalculate_arv(comps_df: pd.DataFrame, num_subjects: int) -> pd.DataFrame:
     """Recalculate ARV for each subject."""
@@ -337,9 +328,30 @@ def recalculate_arv(comps_df: pd.DataFrame, num_subjects: int) -> pd.DataFrame:
     return comps_df
 
 # 4.7 Results saving (Fixed Syntax)
-def save_results(comps_df: pd.DataFrame, num_subjects: int) -> None:
+def save_results(comps_df: pd.DataFrame, num_subjects: int, is_drive_mounted: bool) -> None:
     """Save results to CSV in both Colab and Google Drive, and download to local machine."""
     try:
+        # Outcome1: Format fields
+        FIELDS_KEEP_DECIMALS = [
+            'subject_latitude', 'subject_longitude', 'subject_lot_acres',
+            'est_arv_low', 'est_arv_high', 'vg_ppsf', 'ppsf'
+        ] + [f'comp_{i}_ppsf' for i in range(1, 11)]
+
+        # Round specified fields to two decimals
+        for field in FIELDS_KEEP_DECIMALS:
+            if field in comps_df.columns:
+                comps_df[field] = comps_df[field].round(2)
+            else:
+                logging.warning(f"Field '{field}' not found in DataFrame for rounding.")
+
+        # Convert other numeric fields to integers (remove decimals)
+        numeric_fields_to_round = set(NUMERIC_FIELDS) - set(FIELDS_KEEP_DECIMALS)
+        for field in numeric_fields_to_round:
+            if field in comps_df.columns:
+                comps_df[field] = comps_df[field].round(0).astype(int)
+            else:
+                logging.warning(f"Field '{field}' not found in DataFrame for integer conversion.")
+
         timestamp = datetime.now().strftime("%m%d%y_%H%M%S")
         filename = f"Comps_Analysis_w_Subject_{num_subjects}_{timestamp}.csv"
 
@@ -347,7 +359,7 @@ def save_results(comps_df: pd.DataFrame, num_subjects: int) -> None:
         desired_order = [
             'subject_address', 'subject_beds', 'subject_baths', 'subject_year_built',
             'subject_sqft', 'subject_lot_size', 'subject_latitude', 'subject_longitude', 'subject_lot_acres',
-            'est_arv_low', 'est_arv_high', 'avg_ppsf', 'num_comps'
+            'est_arv_low', 'est_arv_high', 'vg_ppsf', 'ppsf', 'avg_ppsf', 'num_comps'
             # Add comp fields as needed...
         ]
 
@@ -357,17 +369,27 @@ def save_results(comps_df: pd.DataFrame, num_subjects: int) -> None:
 
         # Ensure output directories exist
         os.makedirs(COLAB_OUTPUT_FOLDER, exist_ok=True)
-        os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+        if is_drive_mounted:
+            os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
         # Save to Colab
         colab_path = os.path.join(COLAB_OUTPUT_FOLDER, filename)
         comps_df.to_csv(colab_path, index=False)
         logging.info(f"Results saved in Colab as {colab_path}")
 
-        # Save to Google Drive
-        drive_path = os.path.join(OUTPUT_FOLDER, filename)
-        comps_df.to_csv(drive_path, index=False)
-        logging.info(f"Results saved to Google Drive as {drive_path}")
+        # Save to Google Drive if mounted
+        if is_drive_mounted:
+            drive_path = os.path.join(OUTPUT_FOLDER, filename)
+            comps_df.to_csv(drive_path, index=False)
+            logging.info(f"Results saved to Google Drive as {drive_path}")
+        else:
+            logging.warning("Google Drive is not mounted. Skipping saving to Google Drive.")
+
+        # Outcome3: Print filename and save locations
+        print(f"File '{filename}' has been saved to:")
+        print(f"- Colab directory: {colab_path}")
+        if is_drive_mounted:
+            print(f"- Google Drive folder '{FOLDER_NAME}': {drive_path}")
 
         # Download to local machine
         files.download(colab_path)
@@ -398,6 +420,16 @@ def process_subjects(comps_df: pd.DataFrame, num_subjects: int) -> pd.DataFrame:
 # 5. Main execution function
 def main():
     """Main execution function."""
+    is_drive_mounted = False  # Flag to track if Drive is mounted
+    try:
+        # Attempt to mount Google Drive with force_remount=True to avoid mountpoint errors
+        drive.mount('/content/drive', force_remount=True)  # Modified to include force_remount
+        is_drive_mounted = True
+        logging.info("Google Drive mounted successfully.")
+    except Exception as e:
+        logging.error(f"Failed to mount Google Drive: {e}")
+        print("Google Drive could not be mounted. Proceeding without saving to Google Drive.")
+
     try:
         # Select and upload the REAPI_Comps_Analysis input CSV file
         comps_file = select_file("REAPI_Comps_Analysis")
@@ -422,7 +454,7 @@ def main():
         comps_df = process_subjects(comps_df, num_subjects)
 
         # Save the results
-        save_results(comps_df, num_subjects)
+        save_results(comps_df, num_subjects, is_drive_mounted)
         logging.info(f"Processed {num_subjects} subject properties.")
 
     except KeyError as ke:
