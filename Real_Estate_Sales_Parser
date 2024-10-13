@@ -87,6 +87,15 @@ def read_file(file_path):
 
 
 
+import re
+import pandas as pd
+
+import re
+import pandas as pd
+
+import re
+import pandas as pd
+
 def parse_data(data):
     """
     Parses the raw data using predefined regex patterns and returns a DataFrame.
@@ -94,85 +103,85 @@ def parse_data(data):
     Returns:
         pd.DataFrame: Parsed data.
     """
-    # Define regex patterns for various fields
+    # Define regex patterns for various fields with non-greedy matching and proper delimiters
     field_patterns = {
         'MLS#': r'MLS#\s*(\d+)',
-        'DOM/CDOM': r'DOM/CDOM[:\t]+\s*([\d\/]+)',
-        'Address': r'DOM/CDOM[:\t]+\s*[\d\/]+\s*([\d\w\s,]+,\s*[\w\s]+,\s*FL\s*\d{5})',
-        'County': r'County[:\t]+\s*([\w\s]+)',
+        'DOM/CDOM': r'DOM/CDOM[:\t]+\s*([\d/]+)',
+        'Address': r'DOM/CDOM[:\t]+\s*[\d/]+\s*([^\t\n]+)',
+        'County': r'County[:\t]+\s*([^\t\n]+)',
         'List Price': r'List Price[:\t]+\$?([\d,]+)',
         'Close Price': r'Close Price[:\t]+\$?([\d,]+)',
         'Year Built': r'Year Built[:\t]+\s*(\d+)',
-        'Living Area': r'Living Area[:\t]+\$?([\d,]+)',
+        'Living Area': r'Living Area[:\t]+\s*([\d,]+)',
         'Bedrooms Total': r'Bedrooms Total[:\t]+\s*(\d+)',
         'Bathrooms Total': r'Bathrooms Total[:\t]+\s*(\d+)',
         'Garage Spaces': r'Garage Spaces[:\t]+\s*(\d+)',
         'Parcel Number': r'Parcel Number[:\t]+\s*(\d+)',
-        'Subdivision Name': r'Subdivision Name[:\t]+\s*([\w\s]+)',
+        'Subdivision Name': r'Subdivision Name[:\t]+\s*([^\t\n]+)',
         'CDD Fee': r'CDD Fee[:\t]+\s*(Yes|No)',
         'New Construction': r'New Construction[:\t]+\s*(Yes|No)',
         'Waterfront': r'Waterfront[:\t]+\s*(Yes|No)',
-        'Directions': r'Directions[:\t]+\s*([\w\s,\.]+)',
+        'Directions': r'Directions[:\t]+\s*([^\t\n]+)',
         'Public Remarks': r'Public Remarks[:\t]+\s*([\s\S]*?)\s*\nPrivate Remarks:',
         'Private Remarks': r'Private Remarks[:\t]+\s*([\s\S]*?)(?=\nAppliances:|$)',
         'Appliances': r'Appliances[:\t]+\s*([\w\s;,\-]+)',
-        'Approx Parcel Size': r'Approx Parcel Size[:\t]+\s*([\w\s\.]+)',
-        'Architectural Style': r'Architectural Style[:\t]+\s*([\w\s;,\-]+)',
-        'Construction Materials': r'Construction Materials[:\t]+\s*([\w\s;,\-]+)',
-        'Cooling': r'Cooling[:\t]+\s*([\w\s;,\-]+)',
-        'Current Use': r'Current Use[:\t]+\s*([\w\s;,\-]+)',
-        'DPR Eligible': r'DPR Eligible[:\t]+\s*([\w\s;,\-]*)',
-        'Fencing': r'Fencing[:\t]+\s*([\w\s;,\-]+)',
-        'Fireplace Features': r'Fireplace Features[:\t]+\s*([\w\s;,\-]+)',
-        'Heating': r'Heating[:\t]+\s*([\w\s;,\-]+)',
-        'Interior Features': r'Interior Features[:\t]+\s*([\w\s;,\-]+)',
-        'Laundry Features': r'Laundry Features[:\t]+\s*([\w\s;,\-]+)',
-        'Listing Terms': r'Listing Terms[:\t]+\s*([\w\s;,\-]+)',
-        'Lot Features': r'Lot Features[:\t]+\s*([\w\s;,\-]+)',
-        'Parking Features': r'Parking Features[:\t]+\s*([\w\s;,\-]+)',
-        'Patio And Porch Features': r'Patio And Porch Features[:\t]+\s*([\w\s;,\-]+)',
-        'Pool Features': r'Pool Features[:\t]+\s*([\w\s;,\-]+)',
-        'Possession': r'Possession[:\t]+\s*([\w\s;,\-]+)',
-        'Road Surface Type': r'Road Surface Type[:\t]+\s*([\w\s;,\-]+)',
-        'Roof': r'Roof[:\t]+\s*([\w\s;,\-]+)',
-        'Security Features': r'Security Features[:\t]+\s*([\w\s;,\-]+)',
-        'Sewer': r'Sewer[:\t]+\s*([\w\s;,\-]+)',
-        'Special Listing Conditions': r'Special Listing Conditions[:\t]+\s*([\w\s;,\-]+)',
-        'Utilities': r'Utilities[:\t]+\s*([\w\s;,\-]+)',
-        'Water Source': r'Water Source[:\t]+\s*([\w\s;,\-]+)',
-        'Showing Requirements': r'Showing Requirements[:\t]+\s*([\w\s;,\-]+)',
-        'Showing Considerations': r'Showing Considerations[:\t]+\s*([\w\s;,\-]+)',
+        'Approx Parcel Size': r'Approx Parcel Size[:\t]+\s*([^\t\n]+)',
+        'Architectural Style': r'Architectural Style[:\t]+\s*([^\t\n]+)',
+        'Construction Materials': r'Construction Materials[:\t]+\s*([^\t\n]+)',
+        'Cooling': r'Cooling[:\t]+\s*([^\t\n]+)',
+        'Current Use': r'Current Use[:\t]+\s*([^\t\n]+)',
+        'DPR Eligible': r'DPR Eligible[:\t]+\s*([^\t\n]*)',
+        'Fencing': r'Fencing[:\t]+\s*([^\t\n]+)',
+        'Fireplace Features': r'Fireplace Features[:\t]+\s*([^\t\n]+)',
+        'Heating': r'Heating[:\t]+\s*([^\t\n]+)',
+        'Interior Features': r'Interior Features[:\t]+\s*([^\t\n]+)',
+        'Laundry Features': r'Laundry Features[:\t]+\s*([^\t\n]+)',
+        'Listing Terms': r'Listing Terms[:\t]+\s*([^\t\n]+)',
+        'Lot Features': r'Lot Features[:\t]+\s*([^\t\n]+)',
+        'Parking Features': r'Parking Features[:\t]+\s*([^\t\n]+)',
+        'Patio And Porch Features': r'Patio And Porch Features[:\t]+\s*([^\t\n]+)',
+        'Pool Features': r'Pool Features[:\t]+\s*([^\t\n]+)',
+        'Possession': r'Possession[:\t]+\s*([^\t\n]+)',
+        'Road Surface Type': r'Road Surface Type[:\t]+\s*([^\t\n]+)',
+        'Roof': r'Roof[:\t]+\s*([^\t\n]+)',
+        'Security Features': r'Security Features[:\t]+\s*([^\t\n]+)',
+        'Sewer': r'Sewer[:\t]+\s*([^\t\n]+)',
+        'Special Listing Conditions': r'Special Listing Conditions[:\t]+\s*([^\t\n]+)',
+        'Utilities': r'Utilities[:\t]+\s*([^\t\n]+)',
+        'Water Source': r'Water Source[:\t]+\s*([^\t\n]+)',
+        'Showing Requirements': r'Showing Requirements[:\t]+\s*([^\t\n]+)',
+        'Showing Considerations': r'Showing Considerations[:\t]+\s*([^\t\n]+)',
         'Listing Contract Date': r'Listing Contract Date[:\t]+\s*([\d/]+)',
         'Purchase Contract Date': r'Purchase Contract Date[:\t]+\s*([\d/]+)',
         'Close Date': r'Close Date[:\t]+\s*([\d/]+)',
-        'Listing Service': r'Listing Service[:\t]+\s*([\w\s]+)',
+        'Listing Service': r'Listing Service[:\t]+\s*([^\t\n]+)',
         'Original List Price': r'Original List Price[:\t]+\$?([\d,]+)',
         'List Price/SqFt': r'List Price/SqFt[:\t]+\$?([\d\.]+)',
         'Sold Price/SqFt': r'Sold Price/SqFt[:\t]+\$?([\d\.]+)',
-        'Listing Agreement': r'Listing Agreement[:\t]+\s*([\w\s]+)',
-        'Contingency Reason': r'Contingency Reason[:\t]+\s*([\w\s;,\-]+)',
-        'Buyer Financing': r'Buyer Financing[:\t]+\s*([\w\s;,\-]+)',
+        'Listing Agreement': r'Listing Agreement[:\t]+\s*([^\t\n]+)',
+        'Contingency Reason': r'Contingency Reason[:\t]+\s*([^\t\n]+)',
+        'Buyer Financing': r'Buyer Financing[:\t]+\s*([^\t\n]+)',
         'Concessions': r'Concessions[:\t]+\s*(Yes|No)',
-        'BuyersCountryReside': r'BuyersCountryReside[:\t]+\s*([\w\s]+)',
-        'SellersCountryReside': r'SellersCountryReside[:\t]+\s*([\w\s]+)'
+        'BuyersCountryReside': r'BuyersCountryReside[:\t]+\s*([^\t\n]+)',
+        'SellersCountryReside': r'SellersCountryReside[:\t]+\s*([^\t\n]+)'
     }
 
-    # Define separate regex patterns for LO, LA, SO, and SA
+    # Define separate regex patterns for LO, LA, SO, and SA with proper line start and MULTILINE flag
     lo_pattern = re.compile(
-        r'(?:\n|\t)LO:\s*([^()]+)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email:\)\s*([\w\@\.\+\-]+)',
-        re.IGNORECASE
+        r'^LO:\s*([^()]+?)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email\):\s*([\w\@\.\+\-]+)',
+        re.IGNORECASE | re.MULTILINE
     )
     la_pattern = re.compile(
-        r'(?:\n|\t)LA:\s*([^()]+)\s*\(Phone:\)\s*([\d-]+)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email:\)\s*([\w\@\.\+\-]+)',
-        re.IGNORECASE
+        r'^LA:\s*([^()]+?)\s*\(Phone:\)\s*([\d-]+)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email\):\s*([\w\@\.\+\-]+)',
+        re.IGNORECASE | re.MULTILINE
     )
     so_pattern = re.compile(
-        r'(?:\n|\t)SO:\s*([^()]+)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email:\)\s*([\w\@\.\+\-]+)',
-        re.IGNORECASE
+        r'^SO:\s*([^()]+?)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email\):\s*([\w\@\.\+\-]+)',
+        re.IGNORECASE | re.MULTILINE
     )
     sa_pattern = re.compile(
-        r'(?:\n|\t)SA:\s*([^()]+)\s*\(Office:\)\s*([\d-]+)\s*\(Email:\)\s*([\w\@\.\+\-]+)',
-        re.IGNORECASE
+        r'^SA:\s*([^()]+?)\s*\(Office:\)\s*([\d-]+)\s*\(Email\):\s*([\w\@\.\+\-]+)',
+        re.IGNORECASE | re.MULTILINE
     )
 
     # Split records by 'MLS#', keeping 'MLS#' with the split records
@@ -214,6 +223,12 @@ def parse_data(data):
         so_match = so_pattern.search(record)
         sa_match = sa_pattern.search(record)
 
+        # Debugging: Uncomment the following lines if you want to see the matches during debugging
+        # print("LO Match:", lo_match.groups() if lo_match else "No Match")
+        # print("LA Match:", la_match.groups() if la_match else "No Match")
+        # print("SO Match:", so_match.groups() if so_match else "No Match")
+        # print("SA Match:", sa_match.groups() if sa_match else "No Match")
+
         record_data['LO Name'] = lo_match.group(1).strip() if lo_match else ''
         record_data['LO Office'] = lo_match.group(2).strip() if lo_match else ''
         record_data['LO Fax'] = lo_match.group(3).strip() if lo_match and lo_match.group(3) else ''
@@ -238,6 +253,9 @@ def parse_data(data):
 
     df = pd.DataFrame(parsed_records)
     return df
+
+
+
 
 
 
