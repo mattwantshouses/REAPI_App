@@ -1,5 +1,5 @@
 # RealEstate_Sales_Parser
-# Version 0.9 (Merged with Data Formatting of 0.7)
+# Version 1.3 (Corrected Syntax and Enhanced Close Price Parsing)
 # Number and Date fields are formatted as plain text. Fix that in the future.
 
 import pandas as pd
@@ -138,7 +138,7 @@ def parse_data(data):
             'Address': r'DOM/CDOM[:\t]+\s*[\d/]+\s*([^\t\n]+)',
             'County': r'County[:\t]+\s*([^\t\n]+)',
             'List Price': r'List Price[:\t]+\$?([\d,]+)',
-            'Close Price': r'Close Price[:\t]+\$?([\d,]+)',
+            'Close Price': r'Close Price\s*:\s*\$?([\d,]+)',  # Updated regex for robustness
             'Year Built': r'Year Built[:\t]+\s*(\d+)',
             'Living Area': r'Living Area[:\t]+\s*([\d,]+)',
             'Bedrooms Total': r'Bedrooms Total[:\t]+\s*(\d+)',
@@ -235,7 +235,7 @@ def parse_data(data):
                 match = re.search(pattern, record, re.DOTALL)
                 if match:
                     # 7.6.2 - For numeric fields, remove commas
-                    if field_name in ['List Price', 'Close Price', 'Living Area', 'Bedrooms Total',
+                    if field_name in ['List Price', 'Living Area', 'Bedrooms Total',
                                       'Bathrooms Total', 'Garage Spaces', 'Parcel Number', 'Original List Price']:
                         record_data[field_name] = match.group(1).replace(',', '')
                     elif field_name in ['Concessions', 'CDD Fee', 'New Construction', 'Waterfront']:
@@ -275,6 +275,22 @@ def parse_data(data):
 
         # 7.7 - Create DataFrame from parsed records
         df = pd.DataFrame(parsed_records)
+        
+        # 7.8 - Ensure 'Close Price' is present and correctly parsed
+        if 'Close Price' in df.columns:
+            # Optional: Clean 'Close Price' by removing any potential whitespace
+            df['Close Price'] = df['Close Price'].str.strip()
+            logging.info("'Close Price' parsed as string successfully.")
+        else:
+            logging.warning("'Close Price' column not found in the DataFrame.")
+
+        # 7.9 - Diagnostic Logging: Print DataFrame Columns and Sample Data
+        logging.info(f"DataFrame Columns: {df.columns.tolist()}")
+        logging.info(f"Sample Data:\n{df.head()}")
+        print("\n--- Parsed DataFrame Preview ---")
+        print(df.head())
+        print("---------------------------------\n")
+
         logging.info("Data parsed successfully into DataFrame.")
         return df
 
@@ -316,6 +332,7 @@ def append_to_google_sheet(df, spreadsheet_id, sheet_name):
             # Optionally, reorder DataFrame columns to match the sheet
             df = df.reindex(columns=existing_headers)
             logging.info("Reordered DataFrame columns to match Google Sheet headers.")
+            # Alternatively, you can choose to update the sheet headers or handle mismatches differently
 
         # Find the next empty row
         existing_data = worksheet.get_all_values()
@@ -423,6 +440,11 @@ def main():
     if parsed_data.empty:
         logging.warning("Parsed data is empty. Nothing to save or append.")
         return
+
+    # Display DataFrame Preview
+    print("\n--- Full Parsed DataFrame ---")
+    print(parsed_data)
+    print("------------------------------\n")
 
     # 9.1 - Save to Google Drive as CSV
     save_to_google_drive(parsed_data, GOOGLE_DRIVE_FOLDER_ID)
