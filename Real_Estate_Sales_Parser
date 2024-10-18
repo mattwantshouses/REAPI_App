@@ -1,5 +1,6 @@
 # RealEstate_Sales_Parser
-# Version 0.7
+# Version 0.9 (Merged with Data Formatting of 0.7)
+# Number and Date fields are formatted as plain text. Fix that in the future.
 
 import pandas as pd
 import re
@@ -8,46 +9,74 @@ from google.colab import files
 from google.colab import drive
 from datetime import datetime
 import pytz
+import gspread
+from google.auth import default
+from gspread_dataframe import set_with_dataframe
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 1 - Constants
 GOOGLE_DRIVE_FOLDER_ID = "1dq-zCFoHpl30_f7BRquB_q5wOJnQsxWL"
+GOOGLE_SHEET_ID = "141HNY6bJmz6FKodd3-qCChtyZfmbq9bRqF_9GZ5oqgc"  # Replace with your Google Sheet ID
+GOOGLE_SHEET_NAME = "Master tab"  # Replace with your worksheet name if different
 
+# 2 - Google Drive Functions
 def mount_drive():
     """
-    Mounts Google Drive to the Colab environment.
+    2.1 - Mounts Google Drive to the Colab environment.
     """
     try:
         drive.mount('/content/drive')
+        logging.info("Google Drive mounted successfully.")
     except Exception as e:
-        print(f"An error occurred while mounting Google Drive: {e}")
+        logging.error(f"An error occurred while mounting Google Drive: {e}")
 
-# 4 - File listing and selection
+# 3 - Google Sheets Authentication
+def authenticate_gsheets():
+    """
+    3.1 - Authenticates and returns a gspread client.
+    """
+    try:
+        from google.colab import auth  # Ensure auth is imported here
+        auth.authenticate_user()
+        creds, _ = default()
+        client = gspread.authorize(creds)
+        logging.info("Google Sheets authenticated successfully.")
+        return client
+    except Exception as e:
+        logging.error(f"An error occurred during Google Sheets authentication: {e}")
+        return None
+
+# 4 - File Listing and Selection
 def list_files_in_colab():
     """
-    # 4.1 - List relevant files in the current Colab directory and provide an option to upload a new file
+    4.1 - List relevant files in the current Colab directory and provide an option to upload a new file.
     Returns:
         list: A list of relevant filenames.
     """
-    # 4.2 - Get all files in the current directory
-    all_files = os.listdir('.')
-    
-    # 4.3 - Filter out system files and directories
-    relevant_files = [f for f in all_files if not f.startswith('.') and not os.path.isdir(f)]
-    
-    # 4.4 - Print relevant files
-    print("Relevant files available in the Colab environment:")
-    for i, file_name in enumerate(relevant_files):
-        print(f"{i + 1}. {file_name}")
-    
-    # 4.5 - Add upload option
-    print(f"{len(relevant_files) + 1}. Upload a new file")
-    
-    return relevant_files
+    try:
+        all_files = os.listdir('.')
+        # 4.2 - Get all files in the current directory
+        # 4.3 - Filter out system files and directories
+        relevant_files = [f for f in all_files if not f.startswith('.') and not os.path.isdir(f)]
+        # 4.4 - Print relevant files
+        print("Relevant files available in the Colab environment:")
+        for i, file_name in enumerate(relevant_files):
+            print(f"{i + 1}. {file_name}")
+        # 4.5 - Add upload option
+        print(f"{len(relevant_files) + 1}. Upload a new file")
+        logging.info("Listed relevant files in Colab environment.")
+        return relevant_files
+    except Exception as e:
+        logging.error(f"An error occurred while listing files: {e}")
+        return []
 
-# 5 - User file selection
+# 5 - User File Selection
 def get_user_file_selection(file_list):
     """
-    # 5.1 - Prompt the user to select a file from the list or upload a new one
+    5.1 - Prompt the user to select a file from the list or upload a new one.
     Args:
         file_list (list): List of available filenames.
     Returns:
@@ -57,21 +86,28 @@ def get_user_file_selection(file_list):
         try:
             selected_option = int(input("Enter the number corresponding to the file you want to use: "))
             if 1 <= selected_option <= len(file_list):
-                return file_list[selected_option - 1]
+                selected_file = file_list[selected_option - 1]
+                logging.info(f"Selected file: {selected_file}")
+                return selected_file
             elif selected_option == len(file_list) + 1:
                 uploaded = files.upload()
                 if uploaded:
-                    return list(uploaded.keys())[0]
+                    uploaded_file = list(uploaded.keys())[0]
+                    logging.info(f"Uploaded file: {uploaded_file}")
+                    return uploaded_file
                 else:
-                    print("No file uploaded. Please try again.")
+                    logging.warning("No file uploaded. Please try again.")
             else:
                 print(f"Please enter a number between 1 and {len(file_list) + 1}.")
         except ValueError:
             print("Invalid input. Please enter a valid number.")
+        except Exception as e:
+            logging.error(f"An unexpected error occurred during file selection: {e}")
 
+# 6 - Read File
 def read_file(file_path):
     """
-    Reads the content of a file.
+    6.1 - Reads the content of a file.
     Args:
         file_path (str): Path to the file.
     Returns:
@@ -80,271 +116,321 @@ def read_file(file_path):
     try:
         with open(file_path, 'r', encoding='utf-8') as file:
             data = file.read()
+        logging.info(f"File {file_path} read successfully.")
         return data
     except Exception as e:
-        print(f"An error occurred while reading the file: {e}")
+        logging.error(f"An error occurred while reading the file: {e}")
         return ""
 
-
-
-import re
-import pandas as pd
-
-import re
-import pandas as pd
-
-import re
-import pandas as pd
-
+# 7 - Data Parsing
 def parse_data(data):
     """
-    Parses the raw data using predefined regex patterns and returns a DataFrame.
-    Handles multiple records separated by 'MLS#'.
+    7.1 - Parses the raw data using predefined regex patterns and returns a DataFrame.
+    7.2 - Handles multiple records separated by 'MLS#'.
     Returns:
         pd.DataFrame: Parsed data.
     """
-    # Define regex patterns for various fields with non-greedy matching and proper delimiters
-    field_patterns = {
-        'MLS#': r'MLS#\s*(\d+)',
-        'DOM/CDOM': r'DOM/CDOM[:\t]+\s*([\d/]+)',
-        'Address': r'DOM/CDOM[:\t]+\s*[\d/]+\s*([^\t\n]+)',
-        'County': r'County[:\t]+\s*([^\t\n]+)',
-        'List Price': r'List Price[:\t]+\$?([\d,]+)',
-        'Close Price': r'Close Price[:\t]+\$?([\d,]+)',
-        'Year Built': r'Year Built[:\t]+\s*(\d+)',
-        'Living Area': r'Living Area[:\t]+\s*([\d,]+)',
-        'Bedrooms Total': r'Bedrooms Total[:\t]+\s*(\d+)',
-        'Bathrooms Total': r'Bathrooms Total[:\t]+\s*(\d+)',
-        'Garage Spaces': r'Garage Spaces[:\t]+\s*(\d+)',
-        'Parcel Number': r'Parcel Number[:\t]+\s*(\d+)',
-        'Subdivision Name': r'Subdivision Name[:\t]+\s*([^\t\n]+)',
-        'CDD Fee': r'CDD Fee[:\t]+\s*(Yes|No)',
-        'New Construction': r'New Construction[:\t]+\s*(Yes|No)',
-        'Waterfront': r'Waterfront[:\t]+\s*(Yes|No)',
-        'Directions': r'Directions[:\t]+\s*([^\t\n]+)',
-        'Public Remarks': r'Public Remarks[:\t]+\s*([\s\S]*?)\s*\nPrivate Remarks:',
-        'Private Remarks': r'Private Remarks[:\t]+\s*([\s\S]*?)(?=\nAppliances:|$)',
-        'Appliances': r'Appliances[:\t]+\s*([\w\s;,\-]+)',
-        'Approx Parcel Size': r'Approx Parcel Size[:\t]+\s*([^\t\n]+)',
-        'Architectural Style': r'Architectural Style[:\t]+\s*([^\t\n]+)',
-        'Construction Materials': r'Construction Materials[:\t]+\s*([^\t\n]+)',
-        'Cooling': r'Cooling[:\t]+\s*([^\t\n]+)',
-        'Current Use': r'Current Use[:\t]+\s*([^\t\n]+)',
-        'DPR Eligible': r'DPR Eligible[:\t]+\s*([^\t\n]*)',
-        'Fencing': r'Fencing[:\t]+\s*([^\t\n]+)',
-        'Fireplace Features': r'Fireplace Features[:\t]+\s*([^\t\n]+)',
-        'Heating': r'Heating[:\t]+\s*([^\t\n]+)',
-        'Interior Features': r'Interior Features[:\t]+\s*([^\t\n]+)',
-        'Laundry Features': r'Laundry Features[:\t]+\s*([^\t\n]+)',
-        'Listing Terms': r'Listing Terms[:\t]+\s*([^\t\n]+)',
-        'Lot Features': r'Lot Features[:\t]+\s*([^\t\n]+)',
-        'Parking Features': r'Parking Features[:\t]+\s*([^\t\n]+)',
-        'Patio And Porch Features': r'Patio And Porch Features[:\t]+\s*([^\t\n]+)',
-        'Pool Features': r'Pool Features[:\t]+\s*([^\t\n]+)',
-        'Possession': r'Possession[:\t]+\s*([^\t\n]+)',
-        'Road Surface Type': r'Road Surface Type[:\t]+\s*([^\t\n]+)',
-        'Roof': r'Roof[:\t]+\s*([^\t\n]+)',
-        'Security Features': r'Security Features[:\t]+\s*([^\t\n]+)',
-        'Sewer': r'Sewer[:\t]+\s*([^\t\n]+)',
-        'Special Listing Conditions': r'Special Listing Conditions[:\t]+\s*([^\t\n]+)',
-        'Utilities': r'Utilities[:\t]+\s*([^\t\n]+)',
-        'Water Source': r'Water Source[:\t]+\s*([^\t\n]+)',
-        'Showing Requirements': r'Showing Requirements[:\t]+\s*([^\t\n]+)',
-        'Showing Considerations': r'Showing Considerations[:\t]+\s*([^\t\n]+)',
-        'Listing Contract Date': r'Listing Contract Date[:\t]+\s*([\d/]+)',
-        'Purchase Contract Date': r'Purchase Contract Date[:\t]+\s*([\d/]+)',
-        'Close Date': r'Close Date[:\t]+\s*([\d/]+)',
-        'Listing Service': r'Listing Service[:\t]+\s*([^\t\n]+)',
-        'Original List Price': r'Original List Price[:\t]+\$?([\d,]+)',
-        'List Price/SqFt': r'List Price/SqFt[:\t]+\$?([\d\.]+)',
-        'Sold Price/SqFt': r'Sold Price/SqFt[:\t]+\$?([\d\.]+)',
-        'Listing Agreement': r'Listing Agreement[:\t]+\s*([^\t\n]+)',
-        'Contingency Reason': r'Contingency Reason[:\t]+\s*([^\t\n]+)',
-        'Buyer Financing': r'Buyer Financing[:\t]+\s*([^\t\n]+)',
-        'Concessions': r'Concessions[:\t]+\s*(Yes|No)',
-        'BuyersCountryReside': r'BuyersCountryReside[:\t]+\s*([^\t\n]+)',
-        'SellersCountryReside': r'SellersCountryReside[:\t]+\s*([^\t\n]+)'
-    }
+    try:
+        # 7.3 - Define regex patterns for various fields with non-greedy matching and proper delimiters
+        field_patterns = {
+            'MLS#': r'MLS#\s*(\d+)',
+            'DOM/CDOM': r'DOM/CDOM[:\t]+\s*([\d/]+)',
+            'Address': r'DOM/CDOM[:\t]+\s*[\d/]+\s*([^\t\n]+)',
+            'County': r'County[:\t]+\s*([^\t\n]+)',
+            'List Price': r'List Price[:\t]+\$?([\d,]+)',
+            'Close Price': r'Close Price[:\t]+\$?([\d,]+)',
+            'Year Built': r'Year Built[:\t]+\s*(\d+)',
+            'Living Area': r'Living Area[:\t]+\s*([\d,]+)',
+            'Bedrooms Total': r'Bedrooms Total[:\t]+\s*(\d+)',
+            'Bathrooms Total': r'Bathrooms Total[:\t]+\s*(\d+)',
+            'Garage Spaces': r'Garage Spaces[:\t]+\s*(\d+)',
+            'Parcel Number': r'Parcel Number[:\t]+\s*(\d+)',
+            'Subdivision Name': r'Subdivision Name[:\t]+\s*([^\t\n]+)',
+            'CDD Fee': r'CDD Fee[:\t]+\s*(Yes|No)',
+            'New Construction': r'New Construction[:\t]+\s*(Yes|No)',
+            'Waterfront': r'Waterfront[:\t]+\s*(Yes|No)',
+            'Directions': r'Directions[:\t]+\s*([^\t\n]+)',
+            'Public Remarks': r'Public Remarks[:\t]+\s*([\s\S]*?)\s*\nPrivate Remarks:',
+            'Private Remarks': r'Private Remarks[:\t]+\s*([\s\S]*?)(?=\nAppliances:|$)',
+            'Appliances': r'Appliances[:\t]+\s*([\w\s;,\-]+)',
+            'Approx Parcel Size': r'Approx Parcel Size[:\t]+\s*([^\t\n]+)',
+            'Architectural Style': r'Architectural Style[:\t]+\s*([^\t\n]+)',
+            'Construction Materials': r'Construction Materials[:\t]+\s*([^\t\n]+)',
+            'Cooling': r'Cooling[:\t]+\s*([^\t\n]+)',
+            'Current Use': r'Current Use[:\t]+\s*([^\t\n]+)',
+            'DPR Eligible': r'DPR Eligible[:\t]+\s*([^\t\n]*)',
+            'Fencing': r'Fencing[:\t]+\s*([^\t\n]+)',
+            'Fireplace Features': r'Fireplace Features[:\t]+\s*([^\t\n]+)',
+            'Heating': r'Heating[:\t]+\s*([^\t\n]+)',
+            'Interior Features': r'Interior Features[:\t]+\s*([^\t\n]+)',
+            'Laundry Features': r'Laundry Features[:\t]+\s*([^\t\n]+)',
+            'Listing Terms': r'Listing Terms[:\t]+\s*([^\t\n]+)',
+            'Lot Features': r'Lot Features[:\t]+\s*([^\t\n]+)',
+            'Parking Features': r'Parking Features[:\t]+\s*([^\t\n]+)',
+            'Patio And Porch Features': r'Patio And Porch Features[:\t]+\s*([^\t\n]+)',
+            'Pool Features': r'Pool Features[:\t]+\s*([^\t\n]+)',
+            'Possession': r'Possession[:\t]+\s*([^\t\n]+)',
+            'Road Surface Type': r'Road Surface Type[:\t]+\s*([^\t\n]+)',
+            'Roof': r'Roof[:\t]+\s*([^\t\n]+)',
+            'Security Features': r'Security Features[:\t]+\s*([^\t\n]+)',
+            'Sewer': r'Sewer[:\t]+\s*([^\t\n]+)',
+            'Special Listing Conditions': r'Special Listing Conditions[:\t]+\s*([^\t\n]+)',
+            'Utilities': r'Utilities[:\t]+\s*([^\t\n]+)',
+            'Water Source': r'Water Source[:\t]+\s*([^\t\n]+)',
+            'Showing Requirements': r'Showing Requirements[:\t]+\s*([^\t\n]+)',
+            'Showing Considerations': r'Showing Considerations[:\t]+\s*([^\t\n]+)',
+            'Listing Contract Date': r'Listing Contract Date[:\t]+\s*([\d/]+)',
+            'Purchase Contract Date': r'Purchase Contract Date[:\t]+\s*([\d/]+)',
+            'Close Date': r'Close Date[:\t]+\s*([\d/]+)',
+            'Listing Service': r'Listing Service[:\t]+\s*([^\t\n]+)',
+            'Original List Price': r'Original List Price[:\t]+\$?([\d,]+)',
+            'List Price/SqFt': r'List Price/SqFt[:\t]+\$?([\d\.]+)',
+            'Sold Price/SqFt': r'Sold Price/SqFt[:\t]+\$?([\d\.]+)',
+            'Listing Agreement': r'Listing Agreement[:\t]+\s*([^\t\n]+)',
+            'Contingency Reason': r'Contingency Reason[:\t]+\s*([^\t\n]+)',
+            'Buyer Financing': r'Buyer Financing[:\t]+\s*([^\t\n]+)',
+            'Concessions': r'Concessions[:\t]+\s*(Yes|No)',
+            'BuyersCountryReside': r'BuyersCountryReside[:\t]+\s*([^\t\n]+)',
+            'SellersCountryReside': r'SellersCountryReside[:\t]+\s*([^\t\n]+)'
+        }
 
-    # Define separate regex patterns for LO, LA, SO, and SA with proper line start and MULTILINE flag
-    lo_pattern = re.compile(
-        r'^LO:\s*([^()]+?)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email\):\s*([\w\@\.\+\-]+)',
-        re.IGNORECASE | re.MULTILINE
-    )
-    la_pattern = re.compile(
-        r'^LA:\s*([^()]+?)\s*\(Phone:\)\s*([\d-]+)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email\):\s*([\w\@\.\+\-]+)',
-        re.IGNORECASE | re.MULTILINE
-    )
-    so_pattern = re.compile(
-        r'^SO:\s*([^()]+?)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email\):\s*([\w\@\.\+\-]+)',
-        re.IGNORECASE | re.MULTILINE
-    )
-    sa_pattern = re.compile(
-        r'^SA:\s*([^()]+?)\s*\(Office:\)\s*([\d-]+)\s*\(Email\):\s*([\w\@\.\+\-]+)',
-        re.IGNORECASE | re.MULTILINE
-    )
+        # 7.4 - Define separate regex patterns for LO, LA, SO, and SA with proper line start and MULTILINE flag
+        lo_pattern = re.compile(
+            r'^LO:\s*([^()]+?)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email\):\s*([\w\@\.\+\-]+)',
+            re.IGNORECASE | re.MULTILINE
+        )
+        la_pattern = re.compile(
+            r'^LA:\s*([^()]+?)\s*\(Phone:\)\s*([\d-]+)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email\):\s*([\w\@\.\+\-]+)',
+            re.IGNORECASE | re.MULTILINE
+        )
+        so_pattern = re.compile(
+            r'^SO:\s*([^()]+?)\s*\(Office:\)\s*([\d-]+)(?:\s*\(Fax:\)\s*([\d-]+))?\s*\(Email\):\s*([\w\@\.\+\-]+)',
+            re.IGNORECASE | re.MULTILINE
+        )
+        sa_pattern = re.compile(
+            r'^SA:\s*([^()]+?)\s*\(Office:\)\s*([\d-]+)\s*\(Email\):\s*([\w\@\.\+\-]+)',
+            re.IGNORECASE | re.MULTILINE
+        )
 
-    # Split records by 'MLS#', keeping 'MLS#' with the split records
-    records = re.split(r'(MLS#\s*\d+)', data)
-    # The first element is before the first 'MLS#', likely irrelevant, remove it
-    if records and not re.search(r'MLS#\s*\d+', records[0]):
-        records = records[1:]
-    # Now, pair 'MLS#' with the corresponding record content
-    paired_records = []
-    for i in range(0, len(records), 2):
-        mls = records[i].strip()
-        content = records[i+1].strip() if i+1 < len(records) else ''
-        if mls and content:
-            paired_records.append(mls + "\n" + content)
+        # 7.5 - Split records by 'MLS#', keeping 'MLS#' with the split records
+        records = re.split(r'(MLS#\s*\d+)', data)
+        # 7.5.1 - The first element is before the first 'MLS#', likely irrelevant, remove it
+        if records and not re.search(r'MLS#\s*\d+', records[0]):
+            records = records[1:]
+        # 7.5.2 - Now, pair 'MLS#' with the corresponding record content
+        paired_records = []
+        for i in range(0, len(records), 2):
+            mls = records[i].strip()
+            content = records[i+1].strip() if i+1 < len(records) else ''
+            if mls and content:
+                paired_records.append(mls + "\n" + content)
 
-    parsed_records = []
+        parsed_records = []
 
-    for record in paired_records:
-        record_data = {}
-        # Extract fields
-        for field_name, pattern in field_patterns.items():
-            match = re.search(pattern, record, re.DOTALL)
-            if match:
-                # For numeric fields, remove commas
-                if field_name in ['List Price', 'Close Price', 'Living Area', 'Bedrooms Total', 
-                                  'Bathrooms Total', 'Garage Spaces', 'Parcel Number', 'Original List Price']:
-                    record_data[field_name] = match.group(1).replace(',', '')
-                elif field_name in ['Concessions', 'CDD Fee', 'New Construction', 'Waterfront']:
-                    # Normalize Yes/No to consistent casing
-                    record_data[field_name] = match.group(1).strip().capitalize()
+        # 7.6 - Parse each record
+        for record in paired_records:
+            record_data = {}
+            # 7.6.1 - Extract fields
+            for field_name, pattern in field_patterns.items():
+                match = re.search(pattern, record, re.DOTALL)
+                if match:
+                    # 7.6.2 - For numeric fields, remove commas
+                    if field_name in ['List Price', 'Close Price', 'Living Area', 'Bedrooms Total',
+                                      'Bathrooms Total', 'Garage Spaces', 'Parcel Number', 'Original List Price']:
+                        record_data[field_name] = match.group(1).replace(',', '')
+                    elif field_name in ['Concessions', 'CDD Fee', 'New Construction', 'Waterfront']:
+                        # 7.6.3 - Normalize Yes/No to consistent casing
+                        record_data[field_name] = match.group(1).strip().capitalize()
+                    else:
+                        record_data[field_name] = match.group(1).strip()
                 else:
-                    record_data[field_name] = match.group(1).strip()
-            else:
-                record_data[field_name] = ''
+                    record_data[field_name] = ''
+            # 7.6.4 - Extract LO, LA, SO, SA details
+            lo_match = lo_pattern.search(record)
+            la_match = la_pattern.search(record)
+            so_match = so_pattern.search(record)
+            sa_match = sa_pattern.search(record)
 
-        # Extract LO, LA, SO, SA details
-        lo_match = lo_pattern.search(record)
-        la_match = la_pattern.search(record)
-        so_match = so_pattern.search(record)
-        sa_match = sa_pattern.search(record)
+            record_data['LO Name'] = lo_match.group(1).strip() if lo_match else ''
+            record_data['LO Office'] = lo_match.group(2).strip() if lo_match else ''
+            record_data['LO Fax'] = lo_match.group(3).strip() if lo_match and lo_match.group(3) else ''
+            record_data['LO Email'] = lo_match.group(4).strip() if lo_match else ''
 
-        # Debugging: Uncomment the following lines if you want to see the matches during debugging
-        # print("LO Match:", lo_match.groups() if lo_match else "No Match")
-        # print("LA Match:", la_match.groups() if la_match else "No Match")
-        # print("SO Match:", so_match.groups() if so_match else "No Match")
-        # print("SA Match:", sa_match.groups() if sa_match else "No Match")
+            record_data['LA Name'] = la_match.group(1).strip() if la_match else ''
+            record_data['LA Phone'] = la_match.group(2).strip() if la_match else ''
+            record_data['LA Office'] = la_match.group(3).strip() if la_match else ''
+            record_data['LA Fax'] = la_match.group(4).strip() if la_match and la_match.group(4) else ''
+            record_data['LA Email'] = la_match.group(5).strip() if la_match else ''
 
-        record_data['LO Name'] = lo_match.group(1).strip() if lo_match else ''
-        record_data['LO Office'] = lo_match.group(2).strip() if lo_match else ''
-        record_data['LO Fax'] = lo_match.group(3).strip() if lo_match and lo_match.group(3) else ''
-        record_data['LO Email'] = lo_match.group(4).strip() if lo_match else ''
+            record_data['SO Name'] = so_match.group(1).strip() if so_match else ''
+            record_data['SO Office'] = so_match.group(2).strip() if so_match else ''
+            record_data['SO Fax'] = so_match.group(3).strip() if so_match and so_match.group(3) else ''
+            record_data['SO Email'] = so_match.group(4).strip() if so_match else ''
 
-        record_data['LA Name'] = la_match.group(1).strip() if la_match else ''
-        record_data['LA Phone'] = la_match.group(2).strip() if la_match else ''
-        record_data['LA Office'] = la_match.group(3).strip() if la_match else ''
-        record_data['LA Fax'] = la_match.group(4).strip() if la_match and la_match.group(4) else ''
-        record_data['LA Email'] = la_match.group(5).strip() if la_match else ''
+            record_data['SA Name'] = sa_match.group(1).strip() if sa_match else ''
+            record_data['SA Office'] = sa_match.group(2).strip() if sa_match else ''
+            record_data['SA Email'] = sa_match.group(3).strip() if sa_match else ''
 
-        record_data['SO Name'] = so_match.group(1).strip() if so_match else ''
-        record_data['SO Office'] = so_match.group(2).strip() if so_match else ''
-        record_data['SO Fax'] = so_match.group(3).strip() if so_match and so_match.group(3) else ''
-        record_data['SO Email'] = so_match.group(4).strip() if so_match else ''
+            parsed_records.append(record_data)
 
-        record_data['SA Name'] = sa_match.group(1).strip() if sa_match else ''
-        record_data['SA Office'] = sa_match.group(2).strip() if sa_match else ''
-        record_data['SA Email'] = sa_match.group(3).strip() if sa_match else ''
+        # 7.7 - Create DataFrame from parsed records
+        df = pd.DataFrame(parsed_records)
+        logging.info("Data parsed successfully into DataFrame.")
+        return df
 
-        parsed_records.append(record_data)
+    except Exception as e:
+        logging.error(f"An error occurred while parsing the data: {e}")
+        return pd.DataFrame()  # Return an empty DataFrame in case of error
 
-    df = pd.DataFrame(parsed_records)
-    return df
+# 8 - Append to Google Sheets
+def append_to_google_sheet(df, spreadsheet_id, sheet_name):
+    """
+    8.1 - Appends a DataFrame to the specified Google Sheet without overwriting existing data.
 
+    Args:
+        df (pd.DataFrame): The DataFrame to append.
+        spreadsheet_id (str): The ID of the Google Sheet.
+        sheet_name (str): The name of the worksheet/tab.
+    """
+    if df.empty:
+        logging.warning("DataFrame is empty. Nothing to append to Google Sheet.")
+        return
+    try:
+        client = authenticate_gsheets()
+        if client is None:
+            logging.error("Google Sheets client not initialized.")
+            return
 
+        # Open the Google Sheet
+        sheet = client.open_by_key(spreadsheet_id)
+        worksheet = sheet.worksheet(sheet_name)
+        logging.info(f"Opened Google Sheet: {spreadsheet_id}, Worksheet: {sheet_name}")
 
+        # Fetch existing headers
+        existing_headers = worksheet.row_values(1)
+        df_columns = df.columns.tolist()
 
+        # Check if headers match
+        if existing_headers != df_columns:
+            logging.warning("The DataFrame columns do not match the Google Sheet headers.")
+            # Optionally, reorder DataFrame columns to match the sheet
+            df = df.reindex(columns=existing_headers)
+            logging.info("Reordered DataFrame columns to match Google Sheet headers.")
 
+        # Find the next empty row
+        existing_data = worksheet.get_all_values()
+        next_row = len(existing_data) + 1
+        logging.info(f"Appending data starting at row {next_row}.")
 
+        # Convert DataFrame to list of lists
+        data = df.values.tolist()
 
+        # Append all rows at once (batch insertion for efficiency)
+        worksheet.insert_rows(data, row=next_row)
+        logging.info("Data appended successfully to Google Sheet.")
+    except Exception as e:
+        logging.error(f"An error occurred while appending to Google Sheet: {e}")
+
+# 9 - Save to Google Drive
 def save_to_google_drive(df, folder_id, filename='parsed_sales_data.csv'):
     """
-    # 2.1 - Save DataFrame to a specified folder in Google Drive using folder ID
+    9.1 - Save DataFrame to a specified folder in Google Drive using folder ID.
+
     Args:
         df (pd.DataFrame): The DataFrame to save.
         folder_id (str): ID of the folder in Google Drive.
         filename (str): Base filename for the saved CSV.
     """
     try:
-        # 2.2 - Get current date and time in EST
-        est = pytz.timezone('America/New_York')
-        current_time = datetime.now(est)
-        timestamp = current_time.strftime("%m%d%y-%H%M%S")
-        
-        # 2.3 - Create the new filename with formatted date and time
-        base_name, extension = os.path.splitext(filename)
-        new_filename = f"{base_name}_{timestamp}{extension}"
-        
-        # 2.4 - Save the file to the specified folder using folder ID
         from google.colab import auth
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaFileUpload
-        
+
+        # Get current date and time in EST
+        est = pytz.timezone('America/New_York')
+        current_time = datetime.now(est)
+        timestamp = current_time.strftime("%m%d%y-%H%M%S")
+
+        # Create the new filename with formatted date and time
+        base_name, extension = os.path.splitext(filename)
+        new_filename = f"{base_name}_{timestamp}{extension}"
+
+        # Authenticate and build the Drive service
         auth.authenticate_user()
         drive_service = build('drive', 'v3')
-        
+
         file_metadata = {
             'name': new_filename,
             'parents': [folder_id]
         }
-        
-        # 2.5 - Save DataFrame to a temporary CSV file
+
+        # Save DataFrame to a temporary CSV file
         temp_csv_path = f'/tmp/{new_filename}'
         df.to_csv(temp_csv_path, index=False)
-        
+        logging.info(f"CSV file saved locally at {temp_csv_path}.")
+
         media = MediaFileUpload(temp_csv_path, resumable=True)
         file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        
-        print(f"File saved successfully with ID: {file.get('id')}")
-    except Exception as e:
-        print(f"An error occurred while saving the file to Google Drive: {e}")
 
+        logging.info(f"CSV file saved successfully to Google Drive with ID: {file.get('id')}")
+    except Exception as e:
+        logging.error(f"An error occurred while saving the CSV file to Google Drive: {e}")
+
+# 10 - Download Parsed Data
 def download_parsed_data(df, filename='parsed_sales_data.csv'):
     """
-    Saves the DataFrame locally and initiates a download in Colab.
+    10.1 - Saves the DataFrame locally and initiates a download in Colab.
     Args:
         df (pd.DataFrame): The DataFrame to download.
         filename (str): The name of the file to save and download.
     """
     try:
-        # 6.2 - Get current date and time in EST
+        # Get current date and time in EST
         est = pytz.timezone('America/New_York')
         current_time = datetime.now(est)
         timestamp = current_time.strftime("%m%d%y-%H%M%S")
-        
-        # 6.3 - Create the new filename with formatted date and time
+
+        # Create the new filename with formatted date and time
         base_name, extension = os.path.splitext(filename)
         new_filename = f"{base_name}_{timestamp}{extension}"
-        
-        # 6.4 - Save and download the file
+
+        # Save and download the file
         df.to_csv(new_filename, index=False)
-        print(f"File saved locally as {new_filename}. Initiating download...")
+        logging.info(f"File saved locally as {new_filename}. Initiating download...")
         files.download(new_filename)
     except Exception as e:
-        print(f"An error occurred during the download: {e}")
+        logging.error(f"An error occurred during the download: {e}")
 
+# 11 - Main Function
 def main():
-    # 3.1 - Mount Google Drive
+    """
+    11.1 - Main function to orchestrate the parsing and saving/appending processes.
+    """
+    # 2.1 - Mount Google Drive
     mount_drive()
-    
-    # 3.2 - File selection
+
+    # 4.1 - File listing and selection
     file_list = list_files_in_colab()
     file_path = get_user_file_selection(file_list)
-    
-    # 3.3 - Read and parse data
+
+    # 6.1 - Read and parse data
     data = read_file(file_path)
     if not data:
-        print("No data to parse. Exiting.")
+        logging.warning("No data to parse. Exiting.")
         return
     parsed_data = parse_data(data)
-    
-    # 3.4 - Save to Google Drive using folder ID
+
+    if parsed_data.empty:
+        logging.warning("Parsed data is empty. Nothing to save or append.")
+        return
+
+    # 9.1 - Save to Google Drive as CSV
     save_to_google_drive(parsed_data, GOOGLE_DRIVE_FOLDER_ID)
-    
-    # 3.5 - Download the parsed data
+
+    # 8.1 - Append to Google Sheet
+    append_to_google_sheet(parsed_data, GOOGLE_SHEET_ID, GOOGLE_SHEET_NAME)
+
+    # 10.1 - Download the parsed data
     download_parsed_data(parsed_data)
 
 if __name__ == "__main__":
